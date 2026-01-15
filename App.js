@@ -110,6 +110,10 @@ function prettyReport(report) {
   }
 }
 
+function isStructuredReport(r) {
+  return r && typeof r === "object" && r.summary && r.reliability_level;
+}
+
 // -------------------- API PIPELINE (최종 app.py 기준) --------------------
 // ✅ 통합 엔드포인트 우선: /analyze-integrated (extract + npr)
 // ✅ 그리고 gemini는 별도: /analyze-youtube
@@ -149,15 +153,12 @@ async function pipelineAnalyze(youtubeUrl) {
 
   const report = ay?.report ?? null;
 
-  // verdict 결정 로직:
-  // 1) report에 verdict가 있으면 그걸 쓰고,
-  // 2) 없으면 npr ai_generation_rate로 판정
-  const aiRate = parsePercentString(integrated?.analysis_results?.ai_generation_rate);
-  const vFromNpr = verdictFromAiRate(aiRate);
-  const vFromReport =
-    (typeof report === "object" && report?.verdict) ? normalizeVerdict(report.verdict) : null;
+  // ✅ verdict는 오직 report.reliability_level만 사용
+  const verdict =
+    (typeof report === "object" && report?.reliability_level)
+      ? normalizeVerdict(report.reliability_level)
+      : "주의"; // fallback
 
-  const verdict = vFromReport || vFromNpr;
 
   return {
     videoId: integrated?.video_id || extractYouTubeId(youtubeUrl),
@@ -377,7 +378,11 @@ export default function App() {
       const { videoId, title, storagePath, videoPath, report, npr, full_data, verdict } =
         await pipelineAnalyze(url);
 
-      const summary = summarizeReport(report);
+      const summary =
+        (typeof report === "object" && report?.summary)
+          ? report.summary
+          : "분석 요약을 불러올 수 없습니다.";
+
 
       const finalItem = {
         id: `r-${Date.now()}`,
@@ -539,24 +544,73 @@ export default function App() {
             <Text style={styles.moreBtnText}>상세/원본 더보기 →</Text>
           </Pressable>
 
-          {showEvidence && (
+          {showEvidence && isStructuredReport(selected?.raw?.report) && (
             <View style={{ marginTop: 10 }}>
-              <Text style={styles.sectionTitle}>원본 리포트 (Gemini)</Text>
-              <Text style={styles.bullet}>
-                {prettyReport(selected?.raw?.report).slice(0, 2500) || "(없음)"}
-              </Text>
 
-              <Text style={styles.sectionTitle}>NPR 결과</Text>
-              <Text style={styles.bullet}>
-                {prettyReport(selected?.raw?.npr).slice(0, 1200) || "(없음)"}
-              </Text>
+              {/* 🔹 분석 요약 */}
+              <View style={styles.analysisBox}>
+                <Text style={styles.analysisBoxTitle}>분석 요약</Text>
+                <Text style={styles.analysisBoxText}>
+                  {selected.raw.report.summary}
+                </Text>
+              </View>
 
-              <Text style={styles.sectionTitle}>저장 경로</Text>
-              <Text style={styles.bullet}>• {selected?.raw?.storagePath || "(없음)"}</Text>
-              <Text style={styles.bullet}>• video_path: {selected?.raw?.videoPath || "(없음)"}</Text>
-              <Text style={styles.bullet}>• video_id: {selected?.raw?.videoId || "(없음)"}</Text>
+              {/* 🔹 주요 문제점 */}
+              {Array.isArray(selected.raw.report.issues) && (
+                <View style={styles.analysisBox}>
+                  <Text style={styles.analysisBoxTitle}>주요 문제점</Text>
+                  {selected.raw.report.issues.map((issue, i) => (
+                    <Text key={i} style={styles.analysisBoxBullet}>
+                      • {issue}
+                    </Text>
+                  ))}
+                </View>
+              )}
+
+              {/* 🔹 특허 검증 */}
+              {selected.raw.report.patent_check && (
+                <View style={styles.analysisBox}>
+                  <Text style={styles.analysisBoxTitle}>특허 검증</Text>
+                  <Text style={styles.analysisBoxBullet}>
+                    상태: {selected.raw.report.patent_check.status}
+                  </Text>
+                  <Text style={styles.analysisBoxText}>
+                    {selected.raw.report.patent_check.details}
+                  </Text>
+                  {selected.raw.report.patent_check.patent_number && (
+                    <Text style={styles.analysisBoxBullet}>
+                      특허번호: {selected.raw.report.patent_check.patent_number}
+                    </Text>
+                  )}
+                </View>
+              )}
+
+              {/* 🔹 근거 자료 */}
+              {Array.isArray(selected.raw.report.evidence) && (
+                <View style={styles.analysisBox}>
+                  <Text style={styles.analysisBoxTitle}>근거 자료</Text>
+                  {selected.raw.report.evidence.map((ev, i) => (
+                    <Text key={i} style={styles.analysisBoxBullet}>
+                      • [{ev.source}] {ev.fact}
+                    </Text>
+                  ))}
+                </View>
+              )}
+
+              {/* 🔹 소비자 조언 */}
+              {selected.raw.report.consultation && (
+                <View style={styles.analysisBox}>
+                  <Text style={styles.analysisBoxTitle}>소비자 조언</Text>
+                  <Text style={styles.analysisBoxText}>
+                    {selected.raw.report.consultation}
+                  </Text>
+                </View>
+              )}
+
             </View>
           )}
+
+
 
           <View style={[styles.bigVerdictPill, { borderColor: vColor }]}>
             <Text style={[styles.bigVerdictText, { color: vColor }]}>{selected?.verdict}</Text>
@@ -701,4 +755,39 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.03)",
   },
   bigVerdictText: { fontSize: 22, fontWeight: "900" },
+  analysisBox: {
+    marginTop: 14,
+    padding: 16,
+    borderRadius: 16,
+
+    // 🔹 배경을 살짝 밝게
+    backgroundColor: "#1f1f1f",
+
+    // 🔹 테두리 대비 강화
+    borderWidth: 1,
+    borderColor: "#3a3a3a",
+  },
+
+  analysisBoxTitle: {
+    color: "#ffffff",
+    fontSize: 16,
+    fontWeight: "900",
+    marginBottom: 8,
+  },
+
+  analysisBoxText: {
+    // 🔹 본문 가독성 핵심
+    color: "#f0f0f0",
+    fontSize: 14,
+    lineHeight: 22,
+  },
+
+  analysisBoxBullet: {
+    // 🔹 bullet은 살짝 강조
+    color: "#e6e6e6",
+    fontSize: 14,
+    lineHeight: 22,
+    marginTop: 6,
+  },
+
 });
