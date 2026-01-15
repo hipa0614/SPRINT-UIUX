@@ -1,52 +1,34 @@
-import { StatusBar } from "expo-status-bar";
+import { StatusBar } from 'expo-status-bar';
 import {
-  StyleSheet,
-  Text,
-  View,
-  FlatList,
-  Pressable,
-  Image,
-  ScrollView,
-  ActivityIndicator,
-  Linking,
-  TextInput,
-  Alert,
-} from "react-native";
-import React, { useMemo, useState } from "react";
-import Svg, { Path } from "react-native-svg";
+  StyleSheet, Text, View, FlatList, Pressable, Image, ScrollView, Linking, TextInput, ActivityIndicator
+} from 'react-native';
+import React, { useMemo, useState } from 'react';
+import Svg, { Path } from 'react-native-svg';
 
-// ✅ 폰: PC IPv4로 바꾸기
-// 예) http://10.243.117.150:8080
-const URL_PHONE = "http://10.243.117.150:8080";
-const URL_EMUL = "http://10.0.2.2:8080";
+// ✅ 환경에 맞게 수정
+const API_BASE = "http://10.243.117.150:8080"; // Android Emulator 기준
+// const API_BASE = "http://localhost:8080"; // iOS Simulator
+// const API_BASE = "http://192.168.0.23:8080"; // 실제 폰(PC IP)
 
-// ---------- verdict utils ----------
-function parsePercent(str) {
-  if (!str) return null;
-  const n = Number(String(str).replace("%", "").trim());
-  return Number.isFinite(n) ? n : null;
-}
-function verdictFromAiRate(aiRatePercent) {
-  if (aiRatePercent == null) return "주의";
-  if (aiRatePercent >= 70) return "위험";
-  if (aiRatePercent >= 35) return "주의";
-  return "안전";
-}
+
+// -------------------- UTILS --------------------
 function verdictColor(verdict) {
   if (verdict === "위험") return "#ff3b30";
   if (verdict === "주의") return "#ffcc66";
   return "#6fe3a5";
 }
-function progressFromAiRate(aiRatePercent) {
-  if (aiRatePercent == null) return 0.5;
-  return Math.max(0, Math.min(1, aiRatePercent / 100));
+
+function verdictProgress(verdict) {
+  if (verdict === "안전") return 0.28;
+  if (verdict === "주의") return 0.62;
+  return 0.88;
 }
 
-// ---------- gauge utils ----------
 function polarToCartesian(cx, cy, r, angleDeg) {
   const rad = ((angleDeg - 90) * Math.PI) / 180;
   return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
 }
+
 function arcPath(cx, cy, r, startAngle, endAngle) {
   const start = polarToCartesian(cx, cy, r, startAngle);
   const end = polarToCartesian(cx, cy, r, endAngle);
@@ -55,6 +37,105 @@ function arcPath(cx, cy, r, startAngle, endAngle) {
   return `M ${start.x} ${start.y} A ${r} ${r} 0 ${largeArc} ${sweep} ${end.x} ${end.y}`;
 }
 
+// ✅ 서버가 JSON 대신 HTML(에러페이지) 보내도 안 죽게 하는 파서
+async function fetchJson(url, options) {
+  const res = await fetch(url, options);
+  const text = await res.text(); // ✅ 먼저 text로 받음
+
+  try {
+    const json = JSON.parse(text);
+    if (!res.ok) throw new Error(json.message || `HTTP ${res.status}`);
+    return json;
+  } catch (e) {
+    // JSON이 아니면(대부분 HTML 404/500 페이지)
+    throw new Error(`Not JSON response (HTTP ${res.status}). head=${text.slice(0, 80)}`);
+  }
+}
+
+function extractYouTubeId(url) {
+  if (!url) return null;
+  const m1 = url.match(/[?&]v=([^&]+)/);
+  if (m1?.[1]) return m1[1];
+  const m2 = url.match(/youtu\.be\/([^?&]+)/);
+  if (m2?.[1]) return m2[1];
+  const m3 = url.match(/shorts\/([^?&]+)/);
+  if (m3?.[1]) return m3[1];
+  return null;
+}
+
+function normalizeVerdict(v) {
+  if (v === "안전" || v === "주의" || v === "위험") return v;
+  // report에서 안 나오면 일단 "주의"
+  return "주의";
+}
+
+// report가 string / dict 무엇이든 대비
+function summarizeReport(report) {
+  if (!report) return "분석 결과가 없습니다.";
+  if (typeof report === "string") return report.slice(0, 140);
+  try {
+    return JSON.stringify(report).slice(0, 140);
+  } catch {
+    return "분석 완료";
+  }
+}
+
+function prettyReport(report) {
+  if (!report) return "";
+  if (typeof report === "string") return report;
+  try {
+    return JSON.stringify(report, null, 2);
+  } catch {
+    return String(report);
+  }
+}
+
+
+// -------------------- API PIPELINE (app.py 그대로 사용) --------------------
+async function pipelineAnalyze(youtubeUrl) {
+  // 1) extract
+  const extract = await fetchJson(`${API_BASE}/extract`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url: youtubeUrl }),
+  });
+
+  const videoId = extract.video_id || extractYouTubeId(youtubeUrl);
+  const storagePath = extract.storage_path;
+
+  // 2) analyze-youtube (자막 + gemini)
+  const ay = await fetchJson(`${API_BASE}/analyze-youtube`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      video_url: youtubeUrl,
+      languages: ["ko", "en"],
+      // prompt: 필요하면 추가
+    }),
+  });
+
+  const report = ay.report;
+
+  // 3) (선택) npr 분석: extract가 저장한 video.mp4 경로를 사용
+  // 백엔드 저장 구조가 다르면 이 부분만 맞추면 됨.
+  let npr = null;
+  try {
+    const videoPath = `${storagePath}/video.mp4`;
+    npr = await fetchJson(`${API_BASE}/analyze/npr`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ video_path: videoPath }),
+    });
+  } catch (e) {
+    // npr 실패해도 전체는 성공 처리
+    npr = { status: "error", message: String(e.message || e) };
+  }
+
+  return { videoId, storagePath, report, npr };
+}
+
+
+// -------------------- UI COMPONENTS --------------------
 function FilterButton({ label, active, onPress }) {
   return (
     <Pressable
@@ -76,17 +157,16 @@ function LinkIconButton({ onPress }) {
   );
 }
 
-function TrustGauge({ verdict, aiRatePercent }) {
+function TrustGauge({ verdict }) {
   const color = verdictColor(verdict);
-  const progress = progressFromAiRate(aiRatePercent);
+  const progress = verdictProgress(verdict);
 
-  const size = 220;
+  const size = 210;
   const cx = size / 2;
   const cy = size / 2 + 6;
-  const r = 78;
+  const r = 74;
   const stroke = 12;
 
-  // 240° arc (왼아래 -> 오른아래)
   const startA = 210;
   const endA = -30;
   const totalSweep = endA - startA; // -240
@@ -94,169 +174,213 @@ function TrustGauge({ verdict, aiRatePercent }) {
 
   const bgPath = arcPath(cx, cy, r, startA, endA);
   const fgPath = arcPath(cx, cy, r, startA, progEnd);
+  const innerPath = arcPath(cx, cy, r - 22, startA, endA);
 
+  const [barWidth, setBarWidth] = useState(0);
   const markerPos = verdict === "안전" ? 0 : verdict === "주의" ? 0.5 : 1;
+
+  const tickSize = 14;
+  const markerSize = 16;
+
+  const leftX = 0;
+  const midX = barWidth > 0 ? (barWidth * 0.5 - tickSize / 2) : 0;
+  const rightX = barWidth > 0 ? (barWidth - tickSize) : 0;
+
+  const markerX =
+    barWidth === 0 ? 0 :
+      markerPos === 0 ? 0 :
+        markerPos === 0.5 ? (barWidth * 0.5 - markerSize / 2) :
+          (barWidth - markerSize);
 
   return (
     <View style={styles.card}>
       <Text style={styles.cardTitle}>광고 신뢰도</Text>
 
-      <View style={{ alignItems: "center", marginTop: 12 }}>
+      <View style={styles.gaugeWrap}>
         <View style={{ width: size, height: size }}>
           <Svg width={size} height={size}>
-            <Path d={bgPath} stroke="#6a6a6a" strokeWidth={stroke} strokeLinecap="round" fill="none" opacity={0.9} />
             <Path
-              d={arcPath(cx, cy, r - 24, startA, endA)}
+              d={bgPath}
+              stroke="#6a6a6a"
+              strokeWidth={stroke}
+              strokeLinecap="round"
+              fill="none"
+              opacity={0.9}
+            />
+            <Path
+              d={innerPath}
               stroke="#7a7a7a"
               strokeWidth={5}
               strokeLinecap="round"
               fill="none"
               opacity={0.65}
             />
-            <Path d={fgPath} stroke={color} strokeWidth={stroke} strokeLinecap="round" fill="none" />
+            <Path
+              d={fgPath}
+              stroke={color}
+              strokeWidth={stroke}
+              strokeLinecap="round"
+              fill="none"
+            />
           </Svg>
 
           <View style={styles.gaugeCenter}>
             <Text style={[styles.centerVerdictSmall, { color }]}>{verdict}</Text>
-            {aiRatePercent != null && (
-              <Text style={styles.aiRateText}>AI 생성률 {aiRatePercent.toFixed(2)}%</Text>
-            )}
           </View>
         </View>
+      </View>
 
-        <View style={styles.scaleWrapSmall}>
-          <View style={styles.scaleLineSmall} />
-          <View style={[styles.tickSmall, { left: 0 }]} />
-          <View style={[styles.tickSmall, { left: "50%", marginLeft: -7 }]} />
-          <View style={[styles.tickSmall, { right: 0 }]} />
+      <View
+        style={styles.scaleWrapSmall}
+        onLayout={(e) => setBarWidth(e.nativeEvent.layout.width)}
+      >
+        <View style={styles.scaleLineSmall} />
 
-          <View
-            style={[
-              styles.markerSmall,
-              markerPos === 0 ? { left: 0 } : markerPos === 0.5 ? { left: "50%", marginLeft: -8 } : { right: 0 },
-            ]}
-          />
+        <View style={[styles.tickSmall, { left: leftX, width: tickSize, height: tickSize, borderRadius: 999 }]} />
+        <View style={[styles.tickSmall, { left: midX, width: tickSize, height: tickSize, borderRadius: 999 }]} />
+        <View style={[styles.tickSmall, { left: rightX, width: tickSize, height: tickSize, borderRadius: 999 }]} />
 
-          <View style={styles.scaleLabelsSmall}>
-            <Text style={[styles.scaleTextSmall, verdict === "안전" && { color: verdictColor("안전"), fontWeight: "900" }]}>안전</Text>
-            <Text style={[styles.scaleTextSmall, verdict === "주의" && { color: verdictColor("주의"), fontWeight: "900" }]}>주의</Text>
-            <Text style={[styles.scaleTextSmall, verdict === "위험" && { color: verdictColor("위험"), fontWeight: "900" }]}>위험</Text>
-          </View>
+        <View style={[
+          styles.markerSmall,
+          { left: markerX, width: markerSize, height: markerSize, borderRadius: 999 }
+        ]} />
+
+        <View style={styles.scaleLabelsSmall}>
+          <Text style={[styles.scaleTextSmall, verdict === "안전" && { color: verdictColor("안전"), fontWeight: "900" }]}>안전</Text>
+          <Text style={[styles.scaleTextSmall, verdict === "주의" && { color: verdictColor("주의"), fontWeight: "900" }]}>주의</Text>
+          <Text style={[styles.scaleTextSmall, verdict === "위험" && { color: verdictColor("위험"), fontWeight: "900" }]}>위험</Text>
         </View>
       </View>
     </View>
   );
 }
 
+
+// -------------------- APP --------------------
 export default function App() {
-  const [screen, setScreen] = useState("list");
+  const [screen, setScreen] = useState("list"); // list | detail
   const [selected, setSelected] = useState(null);
-
   const [filter, setFilter] = useState("전체");
-  const [baseUrl, setBaseUrl] = useState(URL_PHONE);
+  const [showEvidence, setShowEvidence] = useState(false);
 
+  // ✅ 서버 통합용 state
+  const [reports, setReports] = useState([]); // MOCK_REPORTS 대신
   const [urlInput, setUrlInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+  const [errorText, setErrorText] = useState("");
 
-  // 서버에서 받은 memo들
-  const [memos, setMemos] = useState([]);
-
-  const memosWithVerdict = useMemo(() => {
-    return memos.map((m) => {
-      const aiRate = parsePercent(m.ai_generation_rate);
-      const verdict = verdictFromAiRate(aiRate);
-      return { ...m, verdict };
-    });
-  }, [memos]);
-
-  const filteredMemos = useMemo(() => {
-    if (filter === "전체") return memosWithVerdict;
-    return memosWithVerdict.filter((m) => m.verdict === filter);
-  }, [filter, memosWithVerdict]);
-
-  const runPipeline = async () => {
-    if (!urlInput.trim()) {
-      Alert.alert("URL 필요", "유튜브 링크를 입력해줘.");
-      return;
-    }
-    setLoading(true);
-    setError("");
-
-    try {
-      const res = await fetch(`${baseUrl}/pipeline`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: urlInput.trim() }),
-      });
-
-      const data = await res.json();
-
-      if (!res.ok || data?.status !== "success") {
-        throw new Error(data?.message || `HTTP ${res.status}`);
-      }
-
-      const memo = data.memo;
-
-      // 최신을 위로
-      setMemos((prev) => [memo, ...prev]);
-      setUrlInput("");
-    } catch (e) {
-      setError(String(e?.message || e));
-    } finally {
-      setLoading(false);
-    }
-  };
+  const filteredReports =
+    filter === "전체" ? reports : reports.filter(r => r.verdict === filter);
 
   const openDetail = (item) => {
     setSelected(item);
+    setShowEvidence(false);
     setScreen("detail");
   };
 
   const goBack = () => {
     setScreen("list");
     setSelected(null);
-    setError("");
   };
 
-  // -------- LIST --------
+  async function onAddUrl() {
+    const url = urlInput.trim();
+    if (!url) return;
+
+    setLoading(true);
+    setErrorText("");
+
+    // 1) UI에 "분석중" 카드 먼저 추가(UX)
+    const tempId = `tmp-${Date.now()}`;
+    const tempVideoId = extractYouTubeId(url);
+    const tempItem = {
+      id: tempId,
+      title: "분석 중...",
+      createdAt: new Date().toISOString().replace("T", " ").slice(0, 16),
+      youtubeUrl: url,
+      thumbnail: tempVideoId ? `https://img.youtube.com/vi/${tempVideoId}/hqdefault.jpg` : null,
+      verdict: "주의",
+      summary: "서버에서 데이터를 수집/분석 중입니다…",
+      flags: [],
+      evidence: [],
+      raw: { status: "processing" },
+    };
+
+    setReports(prev => [tempItem, ...prev]);
+
+    try {
+      const { videoId, storagePath, report, npr } = await pipelineAnalyze(url);
+
+      // ✅ 결과를 하나의 report 카드로 정리
+      const finalVerdict = normalizeVerdict(
+        // report가 dict면 report.verdict를 기대할 수 있지만, 지금은 형식이 불명이라 기본값 유지
+        (typeof report === "object" && report?.verdict) ? report.verdict : "주의"
+      );
+
+      const summary = summarizeReport(report);
+
+      const finalItem = {
+        id: `r-${Date.now()}`,
+        title: `YouTube 분석 (${videoId || "unknown"})`,
+        createdAt: new Date().toISOString().replace("T", " ").slice(0, 16),
+        youtubeUrl: url,
+        thumbnail: (videoId ? `https://img.youtube.com/vi/${videoId}/hqdefault.jpg` : tempItem.thumbnail),
+        verdict: finalVerdict,
+        summary,
+        flags: [],
+        evidence: [],
+        raw: { videoId, storagePath, report, npr },
+      };
+
+      // tempItem 교체
+      setReports(prev => {
+        const withoutTemp = prev.filter(x => x.id !== tempId);
+        return [finalItem, ...withoutTemp];
+      });
+
+      setUrlInput("");
+    } catch (e) {
+      // tempItem을 에러 카드로 교체
+      setReports(prev => prev.map(x => x.id === tempId ? {
+        ...x,
+        title: "분석 실패",
+        verdict: "위험",
+        summary: String(e.message || e),
+        raw: { status: "error" },
+      } : x));
+
+      setErrorText(String(e.message || e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
   if (screen === "list") {
     return (
       <View style={styles.container}>
         <Text style={styles.headerTitle}>AD Astra</Text>
         <Text style={styles.headerSub}>검사 기록</Text>
 
-        {/* base URL toggle */}
+        {/* ✅ URL 입력 */}
         <View style={styles.urlRow}>
-          <Pressable onPress={() => setBaseUrl(URL_PHONE)} style={[styles.urlBtn, baseUrl === URL_PHONE && styles.urlBtnActive]}>
-            <Text style={[styles.urlBtnText, baseUrl === URL_PHONE && styles.urlBtnTextActive]}>폰(PC IP)</Text>
-          </Pressable>
-          <Pressable onPress={() => setBaseUrl(URL_EMUL)} style={[styles.urlBtn, baseUrl === URL_EMUL && styles.urlBtnActive]}>
-            <Text style={[styles.urlBtnText, baseUrl === URL_EMUL && styles.urlBtnTextActive]}>에뮬(10.0.2.2)</Text>
-          </Pressable>
-        </View>
-        <Text style={styles.baseUrlText}>BASE_URL: {baseUrl}</Text>
-
-        {/* 입력 + 분석 버튼 */}
-        <View style={styles.inputRow}>
           <TextInput
             value={urlInput}
             onChangeText={setUrlInput}
-            placeholder="유튜브 링크 붙여넣기"
-            placeholderTextColor="#777"
-            style={styles.input}
+            placeholder="YouTube URL 붙여넣기"
+            placeholderTextColor="#7f7f7f"
+            style={styles.urlInput}
             autoCapitalize="none"
             autoCorrect={false}
           />
-          <Pressable style={styles.analyzeBtn} onPress={runPipeline} disabled={loading}>
-            <Text style={styles.analyzeBtnText}>{loading ? "..." : "분석"}</Text>
+          <Pressable onPress={onAddUrl} style={[styles.urlBtn, loading && { opacity: 0.6 }]}>
+            {loading ? <ActivityIndicator /> : <Text style={styles.urlBtnText}>추가</Text>}
           </Pressable>
         </View>
 
-        {!!error && <Text style={styles.errorText}>에러: {error}</Text>}
-        {loading && <ActivityIndicator size="large" style={{ marginTop: 14 }} />}
+        {!!errorText && (
+          <Text style={styles.errorText}>{errorText}</Text>
+        )}
 
-        {/* 필터 */}
         <View style={styles.filterRow}>
           <FilterButton label="전체" active={filter === "전체"} onPress={() => setFilter("전체")} />
           <FilterButton label="위험" active={filter === "위험"} onPress={() => setFilter("위험")} />
@@ -267,33 +391,35 @@ export default function App() {
         <FlatList
           style={{ width: "100%", marginTop: 14 }}
           contentContainerStyle={{ paddingBottom: 40 }}
-          data={filteredMemos}
+          data={filteredReports}
           keyExtractor={(item) => item.id}
-          ListEmptyComponent={
-            <Text style={{ color: "#777", marginTop: 20 }}>
-              아직 기록이 없어. 링크 입력 → 분석 눌러봐.
-            </Text>
-          }
           renderItem={({ item }) => {
             const color = verdictColor(item.verdict);
             return (
               <Pressable style={styles.listCard} onPress={() => openDetail(item)}>
-                <Image source={{ uri: item.thumbnail_url }} style={styles.thumb} />
+                {item.thumbnail ? (
+                  <Image source={{ uri: item.thumbnail }} style={styles.thumb} />
+                ) : (
+                  <View style={styles.thumb} />
+                )}
                 <View style={{ flex: 1 }}>
                   <View style={styles.rowBetween}>
-                    <Text style={styles.listTitle} numberOfLines={2}>{item.title || item.video_id}</Text>
+                    <Text style={styles.listTitle} numberOfLines={2}>{item.title}</Text>
                     <View style={[styles.badgeBig, { borderColor: color }]}>
                       <Text style={[styles.badgeBigText, { color }]}>{item.verdict}</Text>
                     </View>
                   </View>
                   <Text style={styles.meta}>{item.createdAt}</Text>
-                  <Text style={styles.preview} numberOfLines={1}>
-                    {item.ai_generation_rate ? `AI 생성률: ${item.ai_generation_rate}` : "(임시) 요약 한 줄"}
-                  </Text>
+                  <Text style={styles.preview} numberOfLines={2}>{item.summary}</Text>
                 </View>
               </Pressable>
             );
           }}
+          ListEmptyComponent={
+            <View style={{ marginTop: 30, opacity: 0.8 }}>
+              <Text style={{ color: "#bdbdbd" }}>아직 분석 기록이 없습니다. URL을 추가해보세요.</Text>
+            </View>
+          }
         />
 
         <StatusBar style="light" />
@@ -301,15 +427,7 @@ export default function App() {
     );
   }
 
-  // -------- DETAIL --------
-  const aiRate = parsePercent(selected.ai_generation_rate);
-  const verdict = verdictFromAiRate(aiRate);
-  const vColor = verdictColor(verdict);
-
-  // transcript가 리스트면 텍스트 합치기
-  const transcriptText = Array.isArray(selected.transcript)
-    ? selected.transcript.map((t) => t.text).join(" ")
-    : String(selected.transcript || "");
+  const vColor = verdictColor(selected?.verdict || "주의");
 
   return (
     <View style={styles.modalContainer}>
@@ -324,30 +442,42 @@ export default function App() {
         </Pressable>
       </View>
 
-      <ScrollView style={{ width: "100%" }} contentContainerStyle={{ paddingBottom: 60 }}>
-        <TrustGauge verdict={verdict} aiRatePercent={aiRate} />
+      <ScrollView style={{ width: "100%" }} contentContainerStyle={{ paddingBottom: 50 }}>
+        <TrustGauge verdict={selected?.verdict || "주의"} />
 
         <View style={styles.card}>
           <View style={styles.rowBetween}>
-            <Text style={styles.detailTitle} numberOfLines={2}>{selected.title || selected.video_id}</Text>
-            <LinkIconButton onPress={() => Linking.openURL(selected.youtube_url)} />
+            <Text style={styles.detailTitle} numberOfLines={2}>{selected?.title}</Text>
+            <LinkIconButton onPress={() => selected?.youtubeUrl && Linking.openURL(selected.youtubeUrl)} />
           </View>
 
-          <Text style={styles.meta}>{selected.createdAt}</Text>
+          <Text style={styles.meta}>{selected?.createdAt}</Text>
+          <Text style={styles.body}>{selected?.summary}</Text>
 
-          <Text style={styles.sectionTitle}>AI 생성률</Text>
-          <Text style={styles.kv}>{selected.ai_generation_rate || "-"}</Text>
+          <Pressable onPress={() => setShowEvidence(!showEvidence)} style={styles.moreBtn}>
+            <Text style={styles.moreBtnText}>상세/원본 더보기 →</Text>
+          </Pressable>
 
-          <Text style={styles.sectionTitle}>Gemini 보고서</Text>
-          <Text style={styles.body}>{selected.report || "(보고서 없음)"}</Text>
+          {showEvidence && (
+            <View style={{ marginTop: 10 }}>
+              <Text style={styles.sectionTitle}>원본 리포트</Text>
+              <Text style={styles.bullet}>
+                {prettyReport(selected?.raw?.report).slice(0, 2500) || "(없음)"}
+              </Text>
 
-          <Text style={styles.sectionTitle}>스크립트(요약/원문)</Text>
-          <Text style={styles.body} numberOfLines={12}>
-            {transcriptText || "(자막 없음)"}
-          </Text>
+              <Text style={styles.sectionTitle}>NPR 결과</Text>
+              <Text style={styles.bullet}>
+                {prettyReport(selected?.raw?.npr).slice(0, 1200) || "(없음)"}
+              </Text>
+
+              <Text style={styles.sectionTitle}>저장 경로</Text>
+              <Text style={styles.bullet}>• {selected?.raw?.storagePath || "(없음)"}</Text>
+              <Text style={styles.bullet}>• video_id: {selected?.raw?.videoId || "(없음)"}</Text>
+            </View>
+          )}
 
           <View style={[styles.bigVerdictPill, { borderColor: vColor }]}>
-            <Text style={[styles.bigVerdictText, { color: vColor }]}>{verdict}</Text>
+            <Text style={[styles.bigVerdictText, { color: vColor }]}>{selected?.verdict}</Text>
           </View>
         </View>
       </ScrollView>
@@ -357,59 +487,62 @@ export default function App() {
   );
 }
 
-// ---------- styles ----------
+
+// -------------------- STYLES --------------------
 const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: "#0b0b0b",
-    alignItems: "center",
-    justifyContent: "flex-start",
+    alignItems: 'center',
+    justifyContent: 'flex-start',
     paddingTop: 60,
     paddingHorizontal: 16,
   },
   headerTitle: { color: "#fff", fontSize: 28, fontWeight: "900" },
   headerSub: { color: "#bdbdbd", marginTop: 4, fontSize: 14 },
 
-  urlRow: { flexDirection: "row", gap: 8, marginTop: 14, width: "100%" },
-  urlBtn: {
-    flex: 1,
-    paddingVertical: 10,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "#2a2a2a",
-    backgroundColor: "transparent",
-    alignItems: "center",
+  // ✅ URL 입력 UI
+  urlRow: {
+    width: "100%",
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 14,
   },
-  urlBtnActive: { backgroundColor: "#1b1b1b", borderColor: "#4a4a4a" },
-  urlBtnText: { color: "#d0d0d0", fontWeight: "800" },
-  urlBtnTextActive: { color: "#fff" },
-  baseUrlText: { width: "100%", color: "#8d8d8d", marginTop: 8, fontSize: 12 },
-
-  inputRow: { flexDirection: "row", gap: 10, width: "100%", marginTop: 14 },
-  input: {
+  urlInput: {
     flex: 1,
-    height: 46,
-    borderRadius: 12,
+    backgroundColor: "#141414",
+    borderWidth: 1,
+    borderColor: "#1c1c1c",
+    borderRadius: 14,
     paddingHorizontal: 12,
-    borderWidth: 1,
-    borderColor: "#2a2a2a",
+    paddingVertical: 10,
     color: "#fff",
-    backgroundColor: "#121212",
+    fontSize: 14,
   },
-  analyzeBtn: {
-    width: 78,
-    height: 46,
-    borderRadius: 12,
-    backgroundColor: "#1f6fff",
+  urlBtn: {
+    width: 76,
+    borderRadius: 14,
     alignItems: "center",
     justifyContent: "center",
+    backgroundColor: "#fff",
   },
-  analyzeBtnText: { color: "#fff", fontWeight: "900", fontSize: 16 },
+  urlBtnText: { color: "#111", fontWeight: "900" },
 
-  errorText: { marginTop: 12, color: "#ff4d4d", lineHeight: 20, width: "100%" },
+  errorText: { marginTop: 10, color: "#ff8b8b", fontSize: 12 },
 
-  filterRow: { flexDirection: "row", gap: 8, marginTop: 12, width: "100%" },
-  filterBtn: { flex: 1, paddingVertical: 10, borderRadius: 999, alignItems: "center", borderWidth: 1 },
+  filterRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginTop: 16,
+    width: "100%",
+  },
+  filterBtn: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: 999,
+    alignItems: "center",
+    borderWidth: 1,
+  },
   filterBtnActive: { backgroundColor: "#fff", borderColor: "#fff" },
   filterBtnInactive: { backgroundColor: "transparent", borderColor: "#2a2a2a" },
   filterBtnText: { fontSize: 13, fontWeight: "900" },
@@ -428,6 +561,7 @@ const styles = StyleSheet.create({
   },
   thumb: { width: 96, height: 54, borderRadius: 12, backgroundColor: "#222" },
   rowBetween: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 10 },
+
   listTitle: { flex: 1, color: "#fff", fontSize: 15, fontWeight: "800" },
   meta: { marginTop: 6, color: "#a6a6a6", fontSize: 12 },
   preview: { marginTop: 6, color: "#d9d9d9", fontSize: 13, lineHeight: 18 },
@@ -460,25 +594,71 @@ const styles = StyleSheet.create({
   },
   cardTitle: { color: "#fff", fontSize: 18, fontWeight: "900" },
 
-  gaugeCenter: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, alignItems: "center", justifyContent: "center" },
-  centerVerdictSmall: { fontSize: 44, fontWeight: "900", letterSpacing: 1 },
-  aiRateText: { marginTop: 8, color: "#bdbdbd", fontWeight: "700" },
+  gaugeWrap: {
+    marginTop: 12,
+    alignSelf: "center",
+    overflow: "hidden",
+  },
 
-  scaleWrapSmall: { width: "100%", marginTop: 4, paddingHorizontal: 8 },
+  gaugeCenter: {
+    position: "absolute",
+    left: 0, right: 0, top: 0, bottom: 0,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  centerVerdictSmall: { fontSize: 44, fontWeight: "900", letterSpacing: 1 },
+
+  scaleWrapSmall: { width: "100%", marginTop: 6, paddingHorizontal: 8 },
   scaleLineSmall: { height: 7, backgroundColor: "#7b7b7b", borderRadius: 999, opacity: 0.8 },
-  tickSmall: { position: "absolute", top: -4, width: 14, height: 14, borderRadius: 999, backgroundColor: "#1a1a1a", borderWidth: 2, borderColor: "#9a9a9a" },
-  markerSmall: { position: "absolute", top: -6, width: 16, height: 16, borderRadius: 999, backgroundColor: "#1a1a1a", borderWidth: 3, borderColor: "#fff" },
+
+  tickSmall: {
+    position: "absolute",
+    top: -4,
+    backgroundColor: "#1a1a1a",
+    borderWidth: 2,
+    borderColor: "#9a9a9a",
+  },
+  markerSmall: {
+    position: "absolute",
+    top: -6,
+    backgroundColor: "#1a1a1a",
+    borderWidth: 3,
+    borderColor: "#fff",
+  },
+
   scaleLabelsSmall: { marginTop: 10, flexDirection: "row", justifyContent: "space-between" },
   scaleTextSmall: { color: "#d0d0d0", fontSize: 16 },
 
   detailTitle: { color: "#fff", fontSize: 16, fontWeight: "900", flex: 1 },
-  sectionTitle: { marginTop: 14, color: "#fff", fontSize: 14, fontWeight: "900" },
-  kv: { marginTop: 8, color: "#dcdcdc", fontSize: 14, lineHeight: 20 },
   body: { marginTop: 10, color: "#eaeaea", fontSize: 14, lineHeight: 20 },
 
-  linkIconBtn: { width: 42, height: 42, borderRadius: 999, borderWidth: 1, borderColor: "#333", alignItems: "center", justifyContent: "center", backgroundColor: "#111" },
+  sectionTitle: { marginTop: 14, color: "#fff", fontSize: 14, fontWeight: "900" },
+  bullet: { marginTop: 8, color: "#dcdcdc", fontSize: 14, lineHeight: 20 },
+
+  moreBtn: { marginTop: 16, alignSelf: "flex-end", paddingVertical: 10, paddingHorizontal: 12, borderRadius: 12 },
+  moreBtnText: { color: "#cfcfcf", fontSize: 16, fontWeight: "800" },
+
+  linkIconBtn: {
+    width: 42,
+    height: 42,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "#333",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#111",
+  },
   linkIcon: { color: "#fff", fontSize: 18, fontWeight: "900" },
 
-  bigVerdictPill: { marginTop: 16, alignSelf: "flex-end", borderWidth: 2, paddingVertical: 8, paddingHorizontal: 14, borderRadius: 999, backgroundColor: "rgba(255,255,255,0.03)" },
+  bigVerdictPill: {
+    marginTop: 16,
+    alignSelf: "flex-end",
+    borderWidth: 2,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.03)"
+  },
   bigVerdictText: { fontSize: 22, fontWeight: "900" },
 });
