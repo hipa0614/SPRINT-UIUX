@@ -1,15 +1,23 @@
 import { StatusBar } from 'expo-status-bar';
 import {
-  StyleSheet, Text, View, FlatList, Pressable, Image, ScrollView, Linking, TextInput, ActivityIndicator
+  StyleSheet,
+  Text,
+  View,
+  FlatList,
+  Pressable,
+  Image,
+  ScrollView,
+  Linking,
+  TextInput,
+  ActivityIndicator
 } from 'react-native';
 import React, { useMemo, useState } from 'react';
 import Svg, { Path } from 'react-native-svg';
 
 // ✅ 환경에 맞게 수정
-const API_BASE = "http://10.243.117.150:8080"; // Android Emulator 기준
+const API_BASE = "http://172.30.1.18:8080"; // Android Emulator 기준
 // const API_BASE = "http://localhost:8080"; // iOS Simulator
 // const API_BASE = "http://192.168.0.23:8080"; // 실제 폰(PC IP)
-
 
 // -------------------- UTILS --------------------
 function verdictColor(verdict) {
@@ -17,11 +25,10 @@ function verdictColor(verdict) {
   if (verdict === "주의") return "#ffcc66";
   return "#6fe3a5";
 }
-
 function verdictProgress(verdict) {
-  if (verdict === "안전") return 0.28;
-  if (verdict === "주의") return 0.62;
-  return 0.88;
+  if (verdict === "안전") return 1.0;
+  if (verdict === "주의") return 0.66;
+  return 0.33;
 }
 
 function polarToCartesian(cx, cy, r, angleDeg) {
@@ -40,14 +47,12 @@ function arcPath(cx, cy, r, startAngle, endAngle) {
 // ✅ 서버가 JSON 대신 HTML(에러페이지) 보내도 안 죽게 하는 파서
 async function fetchJson(url, options) {
   const res = await fetch(url, options);
-  const text = await res.text(); // ✅ 먼저 text로 받음
-
+  const text = await res.text();
   try {
     const json = JSON.parse(text);
     if (!res.ok) throw new Error(json.message || `HTTP ${res.status}`);
     return json;
   } catch (e) {
-    // JSON이 아니면(대부분 HTML 404/500 페이지)
     throw new Error(`Not JSON response (HTTP ${res.status}). head=${text.slice(0, 80)}`);
   }
 }
@@ -63,9 +68,24 @@ function extractYouTubeId(url) {
   return null;
 }
 
+function parsePercentString(p) {
+  if (p == null) return null;
+  if (typeof p === "number") return p;
+  const s = String(p).trim().replace("%", "");
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+// ✅ NPR ai_generation_rate 기준으로 verdict 결정 (필요하면 너희 기준으로 조정)
+function verdictFromAiRate(ratePercent) {
+  if (ratePercent == null) return "주의";
+  if (ratePercent >= 60) return "위험";
+  if (ratePercent >= 30) return "주의";
+  return "안전";
+}
+
 function normalizeVerdict(v) {
   if (v === "안전" || v === "주의" || v === "위험") return v;
-  // report에서 안 나오면 일단 "주의"
   return "주의";
 }
 
@@ -90,59 +110,89 @@ function prettyReport(report) {
   }
 }
 
-
-// -------------------- API PIPELINE (app.py 그대로 사용) --------------------
+// -------------------- API PIPELINE (최종 app.py 기준) --------------------
+// ✅ 통합 엔드포인트 우선: /analyze-integrated (extract + npr)
+// ✅ 그리고 gemini는 별도: /analyze-youtube
 async function pipelineAnalyze(youtubeUrl) {
-  // 1) extract
-  const extract = await fetchJson(`${API_BASE}/extract`, {
+  // 1) 통합 분석 (extract + npr)
+  const integrated = await fetchJson(`${API_BASE}/analyze-integrated`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ url: youtubeUrl }),
   });
 
-  const videoId = extract.video_id || extractYouTubeId(youtubeUrl);
-  const storagePath = extract.storage_path;
+  // integrated 예상 응답:
+  // {
+  //   status:"success",
+  //   video_id,
+  //   storage_path,
+  //   video_path,
+  //   analysis_results:{ ai_detected_frames, ai_generation_rate },
+  //   full_data:{...}
+  // }
 
-  // 2) analyze-youtube (자막 + gemini)
-  const ay = await fetchJson(`${API_BASE}/analyze-youtube`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      video_url: youtubeUrl,
-      languages: ["ko", "en"],
-      // prompt: 필요하면 추가
-    }),
-  });
-
-  const report = ay.report;
-
-  // 3) (선택) npr 분석: extract가 저장한 video.mp4 경로를 사용
-  // 백엔드 저장 구조가 다르면 이 부분만 맞추면 됨.
-  let npr = null;
+  // 2) 자막 + Gemini 분석
+  let ay = null;
   try {
-    const videoPath = `${storagePath}/video.mp4`;
-    npr = await fetchJson(`${API_BASE}/analyze/npr`, {
+    ay = await fetchJson(`${API_BASE}/analyze-youtube`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ video_path: videoPath }),
+      body: JSON.stringify({
+        video_url: youtubeUrl,
+        languages: ["ko", "en"],
+        // prompt: 필요하면 추가
+      }),
     });
   } catch (e) {
-    // npr 실패해도 전체는 성공 처리
-    npr = { status: "error", message: String(e.message || e) };
+    ay = { status: "error", message: String(e.message || e), report: null };
   }
 
-  return { videoId, storagePath, report, npr };
-}
+  const report = ay?.report ?? null;
 
+  // verdict 결정 로직:
+  // 1) report에 verdict가 있으면 그걸 쓰고,
+  // 2) 없으면 npr ai_generation_rate로 판정
+  const aiRate = parsePercentString(integrated?.analysis_results?.ai_generation_rate);
+  const vFromNpr = verdictFromAiRate(aiRate);
+  const vFromReport =
+    (typeof report === "object" && report?.verdict) ? normalizeVerdict(report.verdict) : null;
+
+  const verdict = vFromReport || vFromNpr;
+
+  return {
+    videoId: integrated?.video_id || extractYouTubeId(youtubeUrl),
+    title:
+      integrated?.full_data?.video_info?.items?.[0]?.snippet?.title
+      || integrated?.full_data?.video_info?.items?.[0]?.localizations?.ko?.title
+      || "(제목 없음)",
+    storagePath: integrated?.storage_path,
+    videoPath: integrated?.video_path,
+    npr: {
+      status: integrated?.status,
+      analysis_results: integrated?.analysis_results,
+    },
+    full_data: integrated?.full_data,
+    report,
+    verdict,
+  };
+}
 
 // -------------------- UI COMPONENTS --------------------
 function FilterButton({ label, active, onPress }) {
   return (
     <Pressable
       onPress={onPress}
-      style={[styles.filterBtn, active ? styles.filterBtnActive : styles.filterBtnInactive]}
+      style={[
+        styles.filterBtn,
+        active ? styles.filterBtnActive : styles.filterBtnInactive
+      ]}
     >
-      <Text style={[styles.filterBtnText, active ? styles.filterTextActive : styles.filterTextInactive]}>
+      <Text
+        style={[
+          styles.filterBtnText,
+          active ? styles.filterTextActive : styles.filterTextInactive
+        ]}
+      >
         {label}
       </Text>
     </Pressable>
@@ -162,23 +212,24 @@ function TrustGauge({ verdict }) {
   const progress = verdictProgress(verdict);
 
   const size = 210;
+  const stroke = 18;               
+  const pad = 12;                  
   const cx = size / 2;
-  const cy = size / 2 + 6;
-  const r = 74;
-  const stroke = 12;
+  const cy = size / 2;
+  const r = size / 2 - stroke / 2 - pad; 
 
-  const startA = 210;
-  const endA = -30;
-  const totalSweep = endA - startA; // -240
+  // 사진 같은 “∩ 모양” arc
+  const startA = -120;
+  const endA = 120;
+  const totalSweep = endA - startA;         // -240
   const progEnd = startA + totalSweep * progress;
 
   const bgPath = arcPath(cx, cy, r, startA, endA);
   const fgPath = arcPath(cx, cy, r, startA, progEnd);
-  const innerPath = arcPath(cx, cy, r - 22, startA, endA);
 
   const [barWidth, setBarWidth] = useState(0);
-  const markerPos = verdict === "안전" ? 0 : verdict === "주의" ? 0.5 : 1;
 
+  const markerPos = verdict === "안전" ? 0 : verdict === "주의" ? 0.5 : 1;
   const tickSize = 14;
   const markerSize = 16;
 
@@ -187,34 +238,36 @@ function TrustGauge({ verdict }) {
   const rightX = barWidth > 0 ? (barWidth - tickSize) : 0;
 
   const markerX =
-    barWidth === 0 ? 0 :
-      markerPos === 0 ? 0 :
-        markerPos === 0.5 ? (barWidth * 0.5 - markerSize / 2) :
-          (barWidth - markerSize);
+    barWidth === 0
+      ? 0
+      : markerPos === 0
+        ? 0
+        : markerPos === 0.5
+          ? (barWidth * 0.5 - markerSize / 2)
+          : (barWidth - markerSize);
 
   return (
     <View style={styles.card}>
       <Text style={styles.cardTitle}>광고 신뢰도</Text>
 
-      <View style={styles.gaugeWrap}>
+      {/* ✅ 게이지는 정사각형 박스 안에서 완전 중앙정렬 */}
+      <View style={[styles.gaugeWrap, { alignItems: "center", justifyContent: "center" }]}>
         <View style={{ width: size, height: size }}>
-          <Svg width={size} height={size}>
+          <Svg
+            width="100%"
+            height="100%"
+            viewBox={`0 0 ${size} ${size}`} // ✅ 기준 통일
+          >
+            {/* ✅ 남은 구간(회색) */}
             <Path
               d={bgPath}
-              stroke="#6a6a6a"
+              stroke="rgba(255,255,255,0.25)"
               strokeWidth={stroke}
               strokeLinecap="round"
               fill="none"
-              opacity={0.9}
             />
-            <Path
-              d={innerPath}
-              stroke="#7a7a7a"
-              strokeWidth={5}
-              strokeLinecap="round"
-              fill="none"
-              opacity={0.65}
-            />
+
+            {/* ✅ 진행 구간(색) */}
             <Path
               d={fgPath}
               stroke={color}
@@ -224,37 +277,48 @@ function TrustGauge({ verdict }) {
             />
           </Svg>
 
-          <View style={styles.gaugeCenter}>
+          {/* ✅ 텍스트는 absolute로 중앙에 덮기 */}
+          <View
+            style={{
+              position: "absolute",
+              left: 0,
+              right: 0,
+              top: 0,
+              bottom: 0,
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
             <Text style={[styles.centerVerdictSmall, { color }]}>{verdict}</Text>
           </View>
         </View>
       </View>
 
+      {/* 아래 스케일바는 그대로 */}
       <View
         style={styles.scaleWrapSmall}
         onLayout={(e) => setBarWidth(e.nativeEvent.layout.width)}
       >
         <View style={styles.scaleLineSmall} />
-
         <View style={[styles.tickSmall, { left: leftX, width: tickSize, height: tickSize, borderRadius: 999 }]} />
         <View style={[styles.tickSmall, { left: midX, width: tickSize, height: tickSize, borderRadius: 999 }]} />
         <View style={[styles.tickSmall, { left: rightX, width: tickSize, height: tickSize, borderRadius: 999 }]} />
-
-        <View style={[
-          styles.markerSmall,
-          { left: markerX, width: markerSize, height: markerSize, borderRadius: 999 }
-        ]} />
-
+        <View style={[styles.markerSmall, { left: markerX, width: markerSize, height: markerSize, borderRadius: 999 }]} />
         <View style={styles.scaleLabelsSmall}>
-          <Text style={[styles.scaleTextSmall, verdict === "안전" && { color: verdictColor("안전"), fontWeight: "900" }]}>안전</Text>
-          <Text style={[styles.scaleTextSmall, verdict === "주의" && { color: verdictColor("주의"), fontWeight: "900" }]}>주의</Text>
-          <Text style={[styles.scaleTextSmall, verdict === "위험" && { color: verdictColor("위험"), fontWeight: "900" }]}>위험</Text>
+          <Text style={[styles.scaleTextSmall, verdict === "안전" && { color: verdictColor("안전"), fontWeight: "900" }]}>
+            안전
+          </Text>
+          <Text style={[styles.scaleTextSmall, verdict === "주의" && { color: verdictColor("주의"), fontWeight: "900" }]}>
+            주의
+          </Text>
+          <Text style={[styles.scaleTextSmall, verdict === "위험" && { color: verdictColor("위험"), fontWeight: "900" }]}>
+            위험
+          </Text>
         </View>
       </View>
     </View>
   );
 }
-
 
 // -------------------- APP --------------------
 export default function App() {
@@ -293,6 +357,7 @@ export default function App() {
     // 1) UI에 "분석중" 카드 먼저 추가(UX)
     const tempId = `tmp-${Date.now()}`;
     const tempVideoId = extractYouTubeId(url);
+
     const tempItem = {
       id: tempId,
       title: "분석 중...",
@@ -309,27 +374,31 @@ export default function App() {
     setReports(prev => [tempItem, ...prev]);
 
     try {
-      const { videoId, storagePath, report, npr } = await pipelineAnalyze(url);
-
-      // ✅ 결과를 하나의 report 카드로 정리
-      const finalVerdict = normalizeVerdict(
-        // report가 dict면 report.verdict를 기대할 수 있지만, 지금은 형식이 불명이라 기본값 유지
-        (typeof report === "object" && report?.verdict) ? report.verdict : "주의"
-      );
+      const { videoId, title, storagePath, videoPath, report, npr, full_data, verdict } =
+        await pipelineAnalyze(url);
 
       const summary = summarizeReport(report);
 
       const finalItem = {
         id: `r-${Date.now()}`,
-        title: `YouTube 분석 (${videoId || "unknown"})`,
+        title,
         createdAt: new Date().toISOString().replace("T", " ").slice(0, 16),
         youtubeUrl: url,
-        thumbnail: (videoId ? `https://img.youtube.com/vi/${videoId}/hqdefault.jpg` : tempItem.thumbnail),
-        verdict: finalVerdict,
+        thumbnail: videoId
+          ? `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`
+          : tempItem.thumbnail,
+        verdict,
         summary,
         flags: [],
         evidence: [],
-        raw: { videoId, storagePath, report, npr },
+        raw: {
+          videoId,
+          storagePath,
+          videoPath,
+          report,
+          npr,
+          full_data,
+        },
       };
 
       // tempItem 교체
@@ -340,15 +409,19 @@ export default function App() {
 
       setUrlInput("");
     } catch (e) {
-      // tempItem을 에러 카드로 교체
-      setReports(prev => prev.map(x => x.id === tempId ? {
-        ...x,
-        title: "분석 실패",
-        verdict: "위험",
-        summary: String(e.message || e),
-        raw: { status: "error" },
-      } : x));
-
+      setReports(prev =>
+        prev.map(x =>
+          x.id === tempId
+            ? {
+              ...x,
+              title: "분석 실패",
+              verdict: "위험",
+              summary: String(e.message || e),
+              raw: { status: "error" },
+            }
+            : x
+        )
+      );
       setErrorText(String(e.message || e));
     } finally {
       setLoading(false);
@@ -372,14 +445,16 @@ export default function App() {
             autoCapitalize="none"
             autoCorrect={false}
           />
-          <Pressable onPress={onAddUrl} style={[styles.urlBtn, loading && { opacity: 0.6 }]}>
+          <Pressable
+            onPress={onAddUrl}
+            style={[styles.urlBtn, loading && { opacity: 0.6 }]}
+            disabled={loading}
+          >
             {loading ? <ActivityIndicator /> : <Text style={styles.urlBtnText}>추가</Text>}
           </Pressable>
         </View>
 
-        {!!errorText && (
-          <Text style={styles.errorText}>{errorText}</Text>
-        )}
+        {!!errorText && <Text style={styles.errorText}>{errorText}</Text>}
 
         <View style={styles.filterRow}>
           <FilterButton label="전체" active={filter === "전체"} onPress={() => setFilter("전체")} />
@@ -402,6 +477,7 @@ export default function App() {
                 ) : (
                   <View style={styles.thumb} />
                 )}
+
                 <View style={{ flex: 1 }}>
                   <View style={styles.rowBetween}>
                     <Text style={styles.listTitle} numberOfLines={2}>{item.title}</Text>
@@ -409,6 +485,7 @@ export default function App() {
                       <Text style={[styles.badgeBigText, { color }]}>{item.verdict}</Text>
                     </View>
                   </View>
+
                   <Text style={styles.meta}>{item.createdAt}</Text>
                   <Text style={styles.preview} numberOfLines={2}>{item.summary}</Text>
                 </View>
@@ -417,7 +494,9 @@ export default function App() {
           }}
           ListEmptyComponent={
             <View style={{ marginTop: 30, opacity: 0.8 }}>
-              <Text style={{ color: "#bdbdbd" }}>아직 분석 기록이 없습니다. URL을 추가해보세요.</Text>
+              <Text style={{ color: "#bdbdbd" }}>
+                아직 분석 기록이 없습니다. URL을 추가해보세요.
+              </Text>
             </View>
           }
         />
@@ -448,7 +527,9 @@ export default function App() {
         <View style={styles.card}>
           <View style={styles.rowBetween}>
             <Text style={styles.detailTitle} numberOfLines={2}>{selected?.title}</Text>
-            <LinkIconButton onPress={() => selected?.youtubeUrl && Linking.openURL(selected.youtubeUrl)} />
+            <LinkIconButton
+              onPress={() => selected?.youtubeUrl && Linking.openURL(selected.youtubeUrl)}
+            />
           </View>
 
           <Text style={styles.meta}>{selected?.createdAt}</Text>
@@ -460,7 +541,7 @@ export default function App() {
 
           {showEvidence && (
             <View style={{ marginTop: 10 }}>
-              <Text style={styles.sectionTitle}>원본 리포트</Text>
+              <Text style={styles.sectionTitle}>원본 리포트 (Gemini)</Text>
               <Text style={styles.bullet}>
                 {prettyReport(selected?.raw?.report).slice(0, 2500) || "(없음)"}
               </Text>
@@ -472,6 +553,7 @@ export default function App() {
 
               <Text style={styles.sectionTitle}>저장 경로</Text>
               <Text style={styles.bullet}>• {selected?.raw?.storagePath || "(없음)"}</Text>
+              <Text style={styles.bullet}>• video_path: {selected?.raw?.videoPath || "(없음)"}</Text>
               <Text style={styles.bullet}>• video_id: {selected?.raw?.videoId || "(없음)"}</Text>
             </View>
           )}
@@ -486,7 +568,6 @@ export default function App() {
     </View>
   );
 }
-
 
 // -------------------- STYLES --------------------
 const styles = StyleSheet.create({
@@ -527,22 +608,10 @@ const styles = StyleSheet.create({
     backgroundColor: "#fff",
   },
   urlBtnText: { color: "#111", fontWeight: "900" },
-
   errorText: { marginTop: 10, color: "#ff8b8b", fontSize: 12 },
 
-  filterRow: {
-    flexDirection: "row",
-    gap: 8,
-    marginTop: 16,
-    width: "100%",
-  },
-  filterBtn: {
-    flex: 1,
-    paddingVertical: 10,
-    borderRadius: 999,
-    alignItems: "center",
-    borderWidth: 1,
-  },
+  filterRow: { flexDirection: "row", gap: 8, marginTop: 16, width: "100%" },
+  filterBtn: { flex: 1, paddingVertical: 10, borderRadius: 999, alignItems: "center", borderWidth: 1 },
   filterBtnActive: { backgroundColor: "#fff", borderColor: "#fff" },
   filterBtnInactive: { backgroundColor: "transparent", borderColor: "#2a2a2a" },
   filterBtnText: { fontSize: 13, fontWeight: "900" },
@@ -561,11 +630,9 @@ const styles = StyleSheet.create({
   },
   thumb: { width: 96, height: 54, borderRadius: 12, backgroundColor: "#222" },
   rowBetween: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 10 },
-
   listTitle: { flex: 1, color: "#fff", fontSize: 15, fontWeight: "800" },
   meta: { marginTop: 6, color: "#a6a6a6", fontSize: 12 },
   preview: { marginTop: 6, color: "#d9d9d9", fontSize: 13, lineHeight: 18 },
-
   badgeBig: { paddingVertical: 6, paddingHorizontal: 12, borderRadius: 999, borderWidth: 2 },
   badgeBigText: { fontSize: 16, fontWeight: "900" },
 
@@ -593,46 +660,19 @@ const styles = StyleSheet.create({
     padding: 16,
   },
   cardTitle: { color: "#fff", fontSize: 18, fontWeight: "900" },
-
-  gaugeWrap: {
-    marginTop: 12,
-    alignSelf: "center",
-    overflow: "hidden",
-  },
-
-  gaugeCenter: {
-    position: "absolute",
-    left: 0, right: 0, top: 0, bottom: 0,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
+  gaugeWrap: { marginTop: 12, alignSelf: "center", overflow: "hidden" },
+  gaugeCenter: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, alignItems: "center", justifyContent: "center" },
   centerVerdictSmall: { fontSize: 44, fontWeight: "900", letterSpacing: 1 },
 
   scaleWrapSmall: { width: "100%", marginTop: 6, paddingHorizontal: 8 },
   scaleLineSmall: { height: 7, backgroundColor: "#7b7b7b", borderRadius: 999, opacity: 0.8 },
-
-  tickSmall: {
-    position: "absolute",
-    top: -4,
-    backgroundColor: "#1a1a1a",
-    borderWidth: 2,
-    borderColor: "#9a9a9a",
-  },
-  markerSmall: {
-    position: "absolute",
-    top: -6,
-    backgroundColor: "#1a1a1a",
-    borderWidth: 3,
-    borderColor: "#fff",
-  },
-
+  tickSmall: { position: "absolute", top: -4, backgroundColor: "#1a1a1a", borderWidth: 2, borderColor: "#9a9a9a" },
+  markerSmall: { position: "absolute", top: -6, backgroundColor: "#1a1a1a", borderWidth: 3, borderColor: "#fff" },
   scaleLabelsSmall: { marginTop: 10, flexDirection: "row", justifyContent: "space-between" },
   scaleTextSmall: { color: "#d0d0d0", fontSize: 16 },
 
   detailTitle: { color: "#fff", fontSize: 16, fontWeight: "900", flex: 1 },
   body: { marginTop: 10, color: "#eaeaea", fontSize: 14, lineHeight: 20 },
-
   sectionTitle: { marginTop: 14, color: "#fff", fontSize: 14, fontWeight: "900" },
   bullet: { marginTop: 8, color: "#dcdcdc", fontSize: 14, lineHeight: 20 },
 
@@ -658,7 +698,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     paddingHorizontal: 14,
     borderRadius: 999,
-    backgroundColor: "rgba(255,255,255,0.03)"
+    backgroundColor: "rgba(255,255,255,0.03)",
   },
   bigVerdictText: { fontSize: 22, fontWeight: "900" },
 });
