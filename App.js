@@ -1,19 +1,37 @@
-import { StatusBar } from 'expo-status-bar';
+import { StatusBar } from "expo-status-bar";
 import {
-  StyleSheet, Text, View, FlatList, Pressable, Image, ScrollView, Linking, TextInput, ActivityIndicator
-} from 'react-native';
-import React, { useMemo, useState } from 'react';
-import Svg, { Path } from 'react-native-svg';
+  StyleSheet,
+  Text,
+  View,
+  FlatList,
+  Pressable,
+  Image,
+  ScrollView,
+  Linking,
+  TextInput,
+  ActivityIndicator,
+} from "react-native";
+import React, { useMemo, useState } from "react";
+import Svg, { Path } from "react-native-svg";
 
-// ✅ 백엔드 명세서 기반 엔드포인트 설정
-const API_BASE = "http://172.30.1.65:8080/api/video"; 
+/**
+ * ✅ 백엔드(팀 app.py) 기준
+ * POST /api/video/info    { url }
+ * POST /api/video/detect  { url }
+ * POST /api/video/analyze { url }
+ */
+const API_BASE = "https://uncloistral-pseudoheroical-milena.ngrok-free.dev";
+// ⚠️ 아래 같은 “POST ...” 메모 라인은 코드로 인식돼서 앱이 바로 죽음 → 절대 쓰지 말기!
+// POST `${API_BASE}/api/video/info`
+// POST `${API_BASE}/api/video/detect`
+// POST `${API_BASE}/api/video/analyze`
 
 // -------------------- UTILS --------------------
 function verdictColor(verdict) {
   if (verdict === "위험") return "#ff3b30";
   if (verdict === "주의") return "#ffcc66";
   if (verdict === "안전") return "#6fe3a5";
-  return "#555"; 
+  return "#9aa0a6";
 }
 
 function verdictProgress(verdict) {
@@ -21,6 +39,21 @@ function verdictProgress(verdict) {
   if (verdict === "주의") return 0.66;
   if (verdict === "위험") return 0.33;
   return 0.5;
+}
+
+// ✅ AI 생성률(낮음/중간/높음)
+function aiLevelFromRate(ratePercent) {
+  if (ratePercent == null) return "중간";
+  if (ratePercent >= 60) return "높음";
+  if (ratePercent >= 30) return "중간";
+  return "낮음";
+}
+
+function aiLevelColor(level) {
+  if (level === "높음") return "#ff3b30";
+  if (level === "중간") return "#ffcc66";
+  if (level === "낮음") return "#6fe3a5";
+  return "#9aa0a6";
 }
 
 function polarToCartesian(cx, cy, r, angleDeg) {
@@ -34,6 +67,179 @@ function arcPath(cx, cy, r, startAngle, endAngle) {
   const largeArc = Math.abs(endAngle - startAngle) <= 180 ? "0" : "1";
   const sweep = "1";
   return `M ${start.x} ${start.y} A ${r} ${r} 0 ${largeArc} ${sweep} ${end.x} ${end.y}`;
+}
+
+// ✅ 서버가 JSON 대신 HTML(에러페이지) 보내도 안 죽게 하는 파서
+async function fetchJson(url, options) {
+  const res = await fetch(url, options);
+  const text = await res.text();
+  try {
+    const json = JSON.parse(text);
+    if (!res.ok) throw new Error(json.message || `HTTP ${res.status}`);
+    return json;
+  } catch {
+    throw new Error(`Not JSON response (HTTP ${res.status}). head=${text.slice(0, 120)}`);
+  }
+}
+
+function extractYouTubeId(url) {
+  if (!url) return null;
+  const m1 = url.match(/[?&]v=([^&]+)/);
+  if (m1?.[1]) return m1[1];
+  const m2 = url.match(/youtu\.be\/([^?&]+)/);
+  if (m2?.[1]) return m2[1];
+  const m3 = url.match(/shorts\/([^?&]+)/);
+  if (m3?.[1]) return m3[1];
+  return null;
+}
+
+function parsePercentString(p) {
+  if (p == null) return null;
+  if (typeof p === "number") return p;
+  const s = String(p).trim().replace("%", "");
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+function normalizeVerdict(v) {
+  if (v === "안전" || v === "주의" || v === "위험") return v;
+  return "주의";
+}
+
+function summarizeReport(report) {
+  if (!report) return "";
+  if (typeof report === "string") return report.slice(0, 140);
+  try {
+    return JSON.stringify(report).slice(0, 140);
+  } catch {
+    return "";
+  }
+}
+
+function isObj(v) {
+  return v && typeof v === "object" && !Array.isArray(v);
+}
+function safeText(v) {
+  if (v == null) return "";
+  if (typeof v === "string") return v;
+  try {
+    return JSON.stringify(v, null, 2);
+  } catch {
+    return String(v);
+  }
+}
+
+function formatKST(isoLike) {
+  try {
+    const d = new Date(isoLike);
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mi = String(d.getMinutes()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
+  } catch {
+    return String(isoLike);
+  }
+}
+
+// -------------------- API PIPELINE --------------------
+async function pipelineAnalyze(youtubeUrl) {
+  // 1) info
+  let info = null;
+  try {
+    info = await fetchJson(`${API_BASE}/api/video/info`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: youtubeUrl }),
+    });
+  } catch (e) {
+    info = { status: "error", message: String(e.message || e), data: null };
+  }
+
+  // 2) detect
+  let detect = null;
+  try {
+    detect = await fetchJson(`${API_BASE}/api/video/detect`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: youtubeUrl }),
+    });
+  } catch (e) {
+    detect = { status: "error", message: String(e.message || e), data: null };
+  }
+
+  // 3) analyze (gemini)
+  let analyze = null;
+  try {
+    analyze = await fetchJson(`${API_BASE}/api/video/analyze`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: youtubeUrl }),
+    });
+  } catch (e) {
+    analyze = { status: "error", message: String(e.message || e), data: null };
+  }
+
+  const infoData = info?.data ?? null;
+  const detectData = detect?.data ?? null;
+  const analyzeData = analyze?.data ?? null;
+
+  const videoId =
+    infoData?.video_id ||
+    detectData?.video_id ||
+    analyzeData?.video_id ||
+    extractYouTubeId(youtubeUrl);
+
+  const title = infoData?.title || (videoId ? `(${videoId})` : "(unknown)");
+  const thumbnail =
+    infoData?.thumbnail_url ||
+    (videoId ? `https://img.youtube.com/vi/${videoId}/hqdefault.jpg` : null);
+
+  const publishedAt = infoData?.published_at || null;
+
+  const report = analyzeData?.analysis_result ?? null;
+
+  const reliabilityLevel =
+    isObj(report) && report?.reliability_level
+      ? normalizeVerdict(report.reliability_level)
+      : null;
+
+  const aiRate = parsePercentString(detectData?.detection_result?.confidence_score);
+  const aiLevel = aiLevelFromRate(aiRate);
+  const aiProgress = aiRate == null ? 0.5 : Math.max(0, Math.min(1, aiRate / 100));
+
+  // ✅ 리스트 verdict는 reliability_level만 (요청사항)
+  const verdict = reliabilityLevel || "주의";
+
+  const summary =
+    isObj(report) && report?.summary
+      ? String(report.summary)
+      : report
+        ? summarizeReport(report)
+        : "";
+
+  const analysisStatus =
+    info?.status === "success" && detect?.status === "success" && analyze?.status === "success"
+      ? "Done"
+      : info?.status === "error" || detect?.status === "error" || analyze?.status === "error"
+        ? "분석 실패"
+        : "Done";
+
+  return {
+    videoId,
+    title,
+    thumbnail,
+    publishedAt,
+    verdict,
+    summary,
+    analysisStatus,
+    aiRate,
+    aiLevel,
+    aiProgress,
+    report,
+    raw: { info, detect, analyze },
+  };
 }
 
 // -------------------- UI COMPONENTS --------------------
@@ -50,128 +256,204 @@ function FilterButton({ label, active, onPress }) {
   );
 }
 
-function TrustGauge({ verdict }) {
-  const color = verdictColor(verdict);
-  const progress = verdictProgress(verdict);
-  const size = 210;
+function ChipButton({ label, active, onPress }) {
+  return (
+    <Pressable onPress={onPress} style={[styles.chip, active && styles.chipActive]}>
+      <Text style={[styles.chipText, active && styles.chipTextActive]}>{label}</Text>
+    </Pressable>
+  );
+}
+
+// ✅ 피그마 느낌: 게이지 하나짜리(라벨/중앙 텍스트)
+function MiniGauge({ label, mainText, color, progress }) {
+  const size = 190;
   const stroke = 18;
   const pad = 12;
   const cx = size / 2;
   const cy = size / 2;
   const r = size / 2 - stroke / 2 - pad;
+
   const startA = -120;
   const endA = 120;
   const progEnd = startA + (endA - startA) * progress;
+
   const bgPath = arcPath(cx, cy, r, startA, endA);
   const fgPath = arcPath(cx, cy, r, startA, progEnd);
 
   return (
-    <View style={styles.card}>
-      <Text style={styles.cardTitle}>광고 신뢰도</Text>
-      <View style={styles.gaugeWrap}>
-        <View style={{ width: size, height: size }}>
-          <Svg width={size} height={size}>
-            <Path d={bgPath} stroke="rgba(255,255,255,0.1)" strokeWidth={stroke} strokeLinecap="round" fill="none" />
-            <Path d={fgPath} stroke={color} strokeWidth={stroke} strokeLinecap="round" fill="none" />
-          </Svg>
-          <View style={styles.gaugeCenter}>
-            <Text style={[styles.centerVerdictSmall, { color }]}>{verdict}</Text>
-          </View>
+    <View style={styles.gaugeCell}>
+      <View style={{ width: size, height: size }}>
+        <Svg width="100%" height="100%" viewBox={`0 0 ${size} ${size}`}>
+          <Path
+            d={bgPath}
+            stroke="rgba(255,255,255,0.30)"
+            strokeWidth={stroke}
+            strokeLinecap="round"
+            fill="none"
+          />
+          <Path
+            d={fgPath}
+            stroke={color}
+            strokeWidth={stroke}
+            strokeLinecap="round"
+            fill="none"
+          />
+        </Svg>
+
+        <View style={styles.gaugeCenterAbs}>
+          <Text style={[styles.gaugeMainText, { color }]}>{mainText}</Text>
         </View>
       </View>
+
+      <Text style={styles.gaugeLabel}>{label}</Text>
     </View>
   );
 }
 
 // -------------------- MAIN APP --------------------
 export default function App() {
-  const [screen, setScreen] = useState("list");
-  const [reports, setReports] = useState([
-    { id: "ex-1", video_id: "I5u6ATxWXbs", title: "[광고] 국내최초 먹는 성장인자 IGF-1 유효성 검증", createdAt: "2026-01-20", thumbnail: "https://i.ytimg.com/vi/I5u6ATxWXbs/hqdefault.jpg", verdict: "주의", summary: "과장된 의학적 주장이 포함되어 있습니다. 전문의 상의가 필요합니다.", issues: ["검증되지 않은 특허", "공포 마케팅"] },
-    { id: "ex-2", video_id: "wbWIWbI0D4k", title: "단 2주만에 10kg 감량? 다이어트 보조제의 진실", createdAt: "2026-01-20", thumbnail: "https://i.ytimg.com/vi/wbWIWbI0D4k/hqdefault.jpg", verdict: "위험", summary: "딥페이크 기술을 이용한 허위 광고 정황이 포착되었습니다.", issues: ["딥페이크 의심", "허위 사실 유포"] },
-    { id: "ex-3", video_id: "dQw4w9WgXcQ", title: "안전한 유기농 화장품 브랜드 팩트 체크", createdAt: "2026-01-18", thumbnail: "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg", verdict: "안전", summary: "성분 분석 결과 유해 물질이 발견되지 않은 깨끗한 제품입니다.", issues: [] },
-    { id: "ex-4", video_id: "9bZkp7q19f0", title: "수익률 500% 보장? 주식 리딩방의 실체", createdAt: "2026-01-12", thumbnail: "https://i.ytimg.com/vi/9bZkp7q19f0/hqdefault.jpg", verdict: "위험", summary: "불법 금융 투자 사기 유형과 매우 유사합니다.", issues: ["사기 의심", "고수익 미끼"] },
-    { id: "ex-5", video_id: "kJQP7kiw5Fk", title: "유명 연예인이 추천하는 비타민 영양제 분석", createdAt: "2026-01-10", thumbnail: "https://i.ytimg.com/vi/kJQP7kiw5Fk/hqdefault.jpg", verdict: "주의", summary: "연예인의 인지도를 이용했으나 함량 정보가 불투명합니다.", issues: ["함량 미달 가능성", "뒷광고 의심"] },
-    { id: "ex-6", video_id: "60ItHLz5WEA", title: "집에서 하는 5분 스트레칭 효과 검증", createdAt: "2026-01-08", thumbnail: "https://i.ytimg.com/vi/60ItHLz5WEA/hqdefault.jpg", verdict: "안전", summary: "운동 생리학적으로 검증된 동작들로 구성되어 있습니다.", issues: [] },
-    { id: "ex-7", video_id: "OPf0YbXqDm0", title: "바르기만 해도 탈모 치료? 식약처 인증 여부", createdAt: "2026-01-05", thumbnail: "https://i.ytimg.com/vi/OPf0YbXqDm0/hqdefault.jpg", verdict: "위험", summary: "식약처 미인증 제품을 의약품으로 오인하게 광고하고 있습니다.", issues: ["허위 광고", "의약품 오인"] },
-    { id: "ex-8", video_id: "3JZ_D3ELwOQ", title: "최신 스마트폰 90% 할인 쿠폰의 진실", createdAt: "2026-01-03", thumbnail: "https://i.ytimg.com/vi/3JZ_D3ELwOQ/hqdefault.jpg", verdict: "위험", summary: "개인정보 탈취를 목적으로 하는 피싱 사이트 링크가 포함됨.", issues: ["피싱 의심", "개인정보 위협"] },
-    { id: "ex-9", video_id: "L_jWHffIx5E", title: "아이 깨끗해! 천연 성분 아기 세제 리뷰", createdAt: "2026-01-01", thumbnail: "https://i.ytimg.com/vi/L_jWHffIx5E/hqdefault.jpg", verdict: "안전", summary: "환경 마크를 획득한 실제 천연 제품임이 확인되었습니다.", issues: [] },
-    { id: "ex-10", video_id: "V-_O7nl0Ii0", title: "AI가 그려주는 초상화? 서비스 신뢰도 분석", createdAt: "2025-12-28", thumbnail: "https://i.ytimg.com/vi/V-_O7nl0Ii0/hqdefault.jpg", verdict: "주의", summary: "결제 후 결과물이 광고와 다르다는 후기가 많습니다.", issues: ["과장 광고", "환불 정책 불투명"] },
-    { id: "ex-11", video_id: "fRh_vgS2dFE", title: "잠 잘오는 ASMR 채널 광고 분석", createdAt: "2025-12-25", thumbnail: "https://i.ytimg.com/vi/fRh_vgS2dFE/hqdefault.jpg", verdict: "안전", summary: "단순 제품 홍보이며 과학적 근거를 남용하지 않았습니다.", issues: [] },
-    { id: "ex-12", video_id: "y6120QOlsfU", title: "무조건 합격하는 자소서 작성법 강좌", createdAt: "2025-12-20", thumbnail: "https://i.ytimg.com/vi/y6120QOlsfU/hqdefault.jpg", verdict: "주의", summary: "강사의 이력이 일부 부풀려진 정황이 있습니다.", issues: ["경력 허위 기재 의심"] }
-  ]);
-
+  const [screen, setScreen] = useState("list"); // list | detail
   const [selected, setSelected] = useState(null);
+
+  const [reports, setReports] = useState([]);
   const [urlInput, setUrlInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [errorText, setErrorText] = useState("");
+
+  // 검색 + 기간 + 카테고리 필터
   const [filter, setFilter] = useState("전체");
   const [searchText, setSearchText] = useState("");
   const [dateFilter, setDateFilter] = useState("전체");
 
-  // ⭐ 기간 필터 로직이 완벽하게 추가된 부분
+  // 상세 드롭다운
+  const [expanded, setExpanded] = useState(false);
+
   const filteredReports = useMemo(() => {
     const now = new Date();
-    const todayStr = now.toISOString().split('T')[0];
+    const todayStr = now.toISOString().split("T")[0];
     const oneWeekAgo = new Date();
     oneWeekAgo.setDate(now.getDate() - 7);
 
-    return reports.filter(item => {
-      const matchSearch = item.title.toLowerCase().includes(searchText.toLowerCase());
-      const matchCategory = filter === "전체" || item.verdict === filter;
-      
-      let matchDate = true;
-      const itemDate = new Date(item.createdAt);
-      if (dateFilter === "오늘") {
-        matchDate = item.createdAt === todayStr;
-      } else if (dateFilter === "1주일") {
-        matchDate = itemDate >= oneWeekAgo && itemDate <= now;
-      }
+    return reports
+      .filter((item) => {
+        const title = (item.title || "").toLowerCase();
+        const matchSearch = title.includes(searchText.toLowerCase());
+        const matchCategory = filter === "전체" || item.verdict === filter;
 
-      return matchSearch && matchCategory && matchDate;
-    });
+        const t = item.createdAtISO ? new Date(item.createdAtISO) : new Date(0);
+        let matchDate = true;
+
+        if (dateFilter === "오늘") {
+          const itemDay = t.toISOString().split("T")[0];
+          matchDate = itemDay === todayStr;
+        } else if (dateFilter === "1주일") {
+          matchDate = t >= oneWeekAgo && t <= now;
+        }
+
+        return matchSearch && matchCategory && matchDate;
+      })
+      .sort((a, b) => new Date(b.createdAtISO || 0) - new Date(a.createdAtISO || 0));
   }, [reports, searchText, filter, dateFilter]);
 
-  async function onAddUrl() {
-    const url = urlInput.trim();
-    if (!url) return;
-    setLoading(true); setUrlInput("");
+  const openDetail = (item) => {
+    setSelected(item);
+    setExpanded(false);
+    setScreen("detail");
+  };
 
-    const tempId = `temp-${Date.now()}`;
-    const initialItem = {
-      id: tempId, title: "분석 정보를 불러오는 중...",
-      createdAt: new Date().toISOString().split('T')[0],
-      thumbnail: null, youtubeUrl: url, verdict: "대기", summary: "서버 연결 중입니다...",
+  const goBack = () => {
+    setScreen("list");
+    setSelected(null);
+    setExpanded(false);
+  };
+
+async function onAddUrl() {
+  const url = urlInput.trim();
+  if (!url) return;
+
+  setLoading(true);
+  setErrorText("");
+
+  const nowIso = new Date().toISOString();
+  const tempId = `tmp-${Date.now()}`;
+  const tempVideoId = extractYouTubeId(url);
+
+  // 1. [즉시 실행] 리스트에 "분석 중..." 아이템 추가 (이때 썸네일은 ID로 유추)
+  const tempItem = {
+    id: tempId,
+    video_id: tempVideoId || null,
+    title: "기본 정보를 가져오는 중...",
+    createdAtISO: nowIso,
+    youtubeUrl: url,
+    thumbnail: tempVideoId ? `https://img.youtube.com/vi/${tempVideoId}/hqdefault.jpg` : null,
+    verdict: "주의",
+    summary: "",
+    analysisStatus: "준비 중",
+    aiLevel: "중간",
+    aiProgress: 0.5,
+  };
+
+  setReports((prev) => [tempItem, ...prev]);
+  setUrlInput(""); // 입력창 미리 비우기
+
+  try {
+    // 🔥 [핵심 수정] 1단계: 서버에서 기본 정보(info)만 먼저 가져오기
+    const infoRes = await fetchJson(`${API_BASE}/api/video/info`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+
+    if (infoRes.status === "success") {
+      // ✅ 제목과 썸네일을 얻자마자 화면을 한 번 업데이트합니다.
+      setReports((prev) =>
+        prev.map((item) =>
+          item.id === tempId
+            ? { 
+                ...item, 
+                title: infoRes.data.title, 
+                thumbnail: infoRes.data.thumbnail_url,
+                summary: "심층 분석을 진행 중입니다..." 
+              }
+            : item
+        )
+      );
+    }
+
+    // 2단계: 무거운 전체 파이프라인(AI 탐지 + 제미나이 분석) 실행
+    const result = await pipelineAnalyze(url);
+
+    const finalItem = {
+      id: `r-${Date.now()}`,
+      videoId: result.videoId,
+      title: result.title,
+      createdAtISO: nowIso,
+      youtubeUrl: url,
+      thumbnail: result.thumbnail || tempItem.thumbnail,
+      verdict: result.verdict,
+      summary: result.summary,
+      analysisStatus: result.analysisStatus,
+      aiLevel: result.aiLevel,
+      aiRate: result.aiRate,
+      aiProgress: result.aiProgress,
+      report: result.report,
+      raw: result.raw,
     };
-    setReports(prev => [initialItem, ...prev]);
 
-    try {
-      const infoRes = await fetch(`${API_BASE}/info`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url })
-      });
-      const infoJson = await infoRes.json();
-      if (infoJson.status === "success") {
-        const info = infoJson.data;
-        setReports(prev => prev.map(item => 
-          item.id === tempId ? {
-            ...item, video_id: info.video_id, title: info.title,
-            thumbnail: info.thumbnail_url, createdAt: info.published_at.split('T')[0],
-            summary: "기본 정보 로드 완료. 심층 분석 중...",
-          } : item
-        ));
-        // 병렬 분석 요청 (기존 로직 유지)
-        fetch(`${API_BASE}/analyze`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) })
-        .then(res => res.json()).then(json => {
-          if (json.status === "success") {
-            const res = json.data.analysis_result;
-            setReports(prev => prev.map(item => item.video_id === json.data.video_id ? { ...item, verdict: res.reliability_level, summary: res.summary, issues: res.issues } : item));
-          }
-        });
-      }
-    } catch (e) {
-      setReports(prev => prev.map(item => item.id === tempId ? { ...item, title: "서버 연결 실패" } : item));
-    } finally { setLoading(false); }
+    // 임시 아이템을 최종 결과로 교체
+    setReports((prev) => {
+      const withoutTemp = prev.filter((x) => x.id !== tempId);
+      return [finalItem, ...withoutTemp];
+    });
+
+  } catch (e) {
+    setErrorText("분석 중 오류가 발생했습니다.");
+    // 에러 발생 시 상태 업데이트 로직...
+  } finally {
+    setLoading(false);
   }
-
+}
+  // -------------------- LIST SCREEN --------------------
   if (screen === "list") {
     return (
       <View style={styles.container}>
@@ -179,120 +461,423 @@ export default function App() {
         <Text style={styles.headerSub}>검사 기록</Text>
 
         <View style={styles.urlRow}>
-          <TextInput value={urlInput} onChangeText={setUrlInput} placeholder="유튜브 링크를 입력하세요" placeholderTextColor="#666" style={styles.urlInput} />
-          <Pressable onPress={onAddUrl} style={styles.urlBtn}>
-            {loading ? <ActivityIndicator size="small" color="#000" /> : <Text style={styles.urlBtnText}>추가</Text>}
+          <TextInput
+            value={urlInput}
+            onChangeText={setUrlInput}
+            placeholder="YouTube URL 붙여넣기"
+            placeholderTextColor="#7f7f7f"
+            style={styles.urlInput}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <Pressable onPress={onAddUrl} style={[styles.urlBtn, loading && { opacity: 0.6 }]} disabled={loading}>
+            {loading ? <ActivityIndicator /> : <Text style={styles.urlBtnText}>추가</Text>}
           </Pressable>
         </View>
 
+        {!!errorText && <Text style={styles.errorText}>{errorText}</Text>}
+
         <View style={styles.searchRow}>
-          <Text style={{color: '#888', marginRight: 8}}>🔍</Text>
-          <TextInput value={searchText} onChangeText={setSearchText} placeholder="결과 내 제목 검색" placeholderTextColor="#444" style={styles.searchField} />
+          <Text style={{ color: "#bdbdbd", marginRight: 8 }}>🔍</Text>
+          <TextInput
+            value={searchText}
+            onChangeText={setSearchText}
+            placeholder="제목 검색"
+            placeholderTextColor="#8a8a8a"
+            style={styles.searchField}
+          />
         </View>
 
         <View style={styles.dateRow}>
-          {["전체", "오늘", "1주일"].map(d => (
-            <Pressable key={d} onPress={() => setDateFilter(d)} style={[styles.dateChip, dateFilter === d && styles.dateChipActive]}>
-              <Text style={{color: dateFilter === d ? '#000' : '#888', fontSize: 12, fontWeight: 'bold'}}>{d}</Text>
-            </Pressable>
+          {["전체", "오늘", "1주일"].map((d) => (
+            <ChipButton key={d} label={d} active={dateFilter === d} onPress={() => setDateFilter(d)} />
           ))}
         </View>
 
         <View style={styles.filterRow}>
-          {["전체", "위험", "주의", "안전"].map(l => (
+          {["전체", "위험", "주의", "안전"].map((l) => (
             <FilterButton key={l} label={l} active={filter === l} onPress={() => setFilter(l)} />
           ))}
         </View>
 
         <FlatList
+          style={{ width: "100%", marginTop: 14 }}
+          contentContainerStyle={{ paddingBottom: 40 }}
           data={filteredReports}
           keyExtractor={(item) => item.id}
-          renderItem={({ item }) => (
-            <Pressable style={styles.listCard} onPress={() => { setSelected(item); setScreen("detail"); }}>
-              {item.thumbnail ? (
-                <Image source={{ uri: item.thumbnail }} style={styles.thumb} />
-              ) : (
-                <View style={[styles.thumb, {backgroundColor: '#222', justifyContent: 'center', alignItems: 'center'}]}>
-                   <ActivityIndicator size="small" color="#444" />
+          renderItem={({ item }) => {
+            const color = verdictColor(item.verdict);
+            return (
+              <Pressable style={styles.listCard} onPress={() => openDetail(item)}>
+                {item.thumbnail ? (
+                  <Image source={{ uri: item.thumbnail }} style={styles.thumb} />
+                ) : (
+                  <View style={[styles.thumb, { justifyContent: "center", alignItems: "center" }]}>
+                    <ActivityIndicator size="small" />
+                  </View>
+                )}
+
+                <View style={{ flex: 1 }}>
+                  <View style={styles.rowBetween}>
+                    <Text style={styles.listTitle} numberOfLines={2}>
+                      {item.title}
+                    </Text>
+                    <View style={[styles.badgeBig, { borderColor: color }]}>
+                      <Text style={[styles.badgeBigText, { color }]}>{item.verdict}</Text>
+                    </View>
+                  </View>
+
+                  <Text style={styles.meta}>검사: {item.createdAtISO ? formatKST(item.createdAtISO) : "(없음)"}</Text>
+                  <Text style={styles.meta}>상태: {item.analysisStatus || "Done"}</Text>
+
+                  {!!item.summary && (
+                    <Text style={styles.preview} numberOfLines={2}>
+                      {item.summary}
+                    </Text>
+                  )}
                 </View>
-              )}
-              <View style={{ flex: 1 }}>
-                <View style={styles.rowBetween}>
-                  <Text style={styles.listTitle} numberOfLines={1}>{item.title}</Text>
-                  <Text style={{ color: verdictColor(item.verdict), fontSize: 10, fontWeight: 'bold' }}>{item.verdict}</Text>
-                </View>
-                <Text style={styles.meta}>{item.createdAt}</Text>
-                <Text style={styles.preview} numberOfLines={2}>{item.summary}</Text>
-              </View>
-            </Pressable>
-          )}
+              </Pressable>
+            );
+          }}
+          ListEmptyComponent={
+            <View style={{ marginTop: 30, opacity: 0.85 }}>
+              <Text style={{ color: "#bdbdbd" }}>아직 분석 기록이 없습니다. URL을 추가해보세요.</Text>
+            </View>
+          }
         />
+
         <StatusBar style="light" />
       </View>
     );
   }
 
+  // -------------------- DETAIL SCREEN --------------------
+  const factVerdict = selected?.verdict || "주의";
+  const factColor = verdictColor(factVerdict);
+
+  const aiLevel = selected?.aiLevel || "중간";
+  const aiColor = aiLevelColor(aiLevel); // ✅ 수정: AI 레벨 컬러 함수 사용
+  const aiProgress = typeof selected?.aiProgress === "number" ? selected.aiProgress : 0.5;
+
+  const report = selected?.report;
+  const issues = isObj(report) && Array.isArray(report.issues) ? report.issues : [];
+  const evidence = isObj(report) && Array.isArray(report.evidence) ? report.evidence : [];
+
   return (
     <View style={styles.modalContainer}>
       <View style={styles.modalTopBar}>
-        <Pressable onPress={() => setScreen("list")}><Text style={{color: '#fff', fontSize: 16}}>← 목록</Text></Pressable>
-        <Text style={styles.modalTitle}>분석 상세</Text>
-        <View style={{width: 40}} />
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+          <Text style={{ fontSize: 18 }}>🚀</Text>
+          <Text style={styles.modalTitle}>AD ASTRA 분석</Text>
+        </View>
+
+        <Pressable onPress={goBack} style={styles.closeBtn}>
+          <Text style={styles.closeText}>✕</Text>
+        </Pressable>
       </View>
-      <ScrollView contentContainerStyle={{paddingBottom: 40}}>
-        <TrustGauge verdict={selected?.verdict || "대기"} />
-        <View style={styles.card}>
-          <Text style={styles.detailTitle}>{selected?.title}</Text>
-          <Text style={styles.body}>{selected?.summary}</Text>
-          {selected?.issues && (
-            <View style={styles.analysisBox}>
-              <Text style={styles.analysisBoxTitle}>주요 이슈</Text>
-              {selected.issues.map((issue, i) => (
-                <Text key={i} style={styles.analysisBoxBullet}>• {issue}</Text>
-              ))}
+
+      <ScrollView style={{ width: "100%" }} contentContainerStyle={{ paddingBottom: 70 }}>
+        <View style={styles.bigCard}>
+          <Text style={styles.bigCardTitle}>광고 신뢰도</Text>
+
+          <View style={styles.gaugesRow}>
+            <MiniGauge
+              label="사실 확인"
+              mainText={factVerdict}
+              color={factColor}
+              progress={verdictProgress(factVerdict)}
+            />
+            <MiniGauge
+              label="AI 생성률"
+              mainText={aiLevel}
+              color={aiColor}
+              progress={aiProgress}
+            />
+          </View>
+        </View>
+
+        <View style={styles.bigCard}>
+          <View style={styles.detailTopRow}>
+            <Text style={styles.detailTitle} numberOfLines={2}>
+              {selected?.title}
+            </Text>
+
+            <Pressable
+              onPress={() => selected?.youtubeUrl && Linking.openURL(selected.youtubeUrl)}
+              style={styles.playBtn}
+            >
+              <Text style={styles.playIcon}>▶</Text>
+            </Pressable>
+          </View>
+
+          <Text style={styles.metaLine}>
+            <Text style={styles.metaLabel}>검사 시각 </Text>
+            <Text style={styles.metaValue}>
+              {selected?.createdAtISO ? formatKST(selected.createdAtISO) : "(없음)"}
+            </Text>
+          </Text>
+
+          <Text style={styles.metaLine}>
+            <Text style={styles.metaLabel}>영상 제작 </Text>
+            <Text style={styles.metaValue}>
+              {selected?.publishedAt ? formatKST(selected.publishedAt) : "(없음)"}
+            </Text>
+          </Text>
+
+          <Text style={styles.metaLine}>
+            <Text style={styles.metaLabel}>검사 상태 </Text>
+            <Text style={styles.metaValue}>{selected?.analysisStatus || "Done"}</Text>
+          </Text>
+
+          {!!selected?.summary && <Text style={styles.summaryText}>{selected.summary}</Text>}
+
+          <Pressable onPress={() => setExpanded(!expanded)} style={styles.expandBtn}>
+            <Text style={styles.expandText}>
+              판정 근거 더보기 {expanded ? "▲" : "▼"}
+            </Text>
+          </Pressable>
+
+          {expanded && (
+            <View style={{ marginTop: 14 }}>
+              <Text style={styles.sectionHeader}>의심 신호</Text>
+              {issues.length === 0 ? (
+                <Text style={styles.sectionBodyMuted}>표시할 의심 신호가 없습니다.</Text>
+              ) : (
+                <View style={{ marginTop: 10, gap: 10 }}>
+                  {issues.map((it, idx) => (
+                    <View key={`iss-${idx}`} style={styles.bulletRow}>
+                      <Text style={styles.bulletDot}>•</Text>
+                      <Text style={styles.bulletText}>{safeText(it)}</Text>
+                    </View>
+                  ))}
+                </View>
+              )}
+
+              <Text style={[styles.sectionHeader, { marginTop: 22 }]}>근거</Text>
+
+              {isObj(report?.patent_check) && !!report.patent_check.details && (
+                <View style={[styles.evidenceBox, { marginTop: 10 }]}>
+                  <Text style={styles.evidenceSource}>특허/검증</Text>
+                  <Text style={styles.evidenceFact}>{safeText(report.patent_check.details)}</Text>
+                </View>
+              )}
+
+              {evidence.length === 0 ? (
+                <Text style={[styles.sectionBodyMuted, { marginTop: 10 }]}>표시할 근거가 없습니다.</Text>
+              ) : (
+                <View style={{ marginTop: 10, gap: 12 }}>
+                  {evidence.map((ev, idx) => {
+                    const source = ev?.source;
+                    const fact = ev?.fact;
+                    const url = ev?.url;
+
+                    return (
+                      <View key={`ev-${idx}`} style={styles.evidenceBox}>
+                        {!!source && <Text style={styles.evidenceSource}>{safeText(source)}</Text>}
+                        {!!fact && <Text style={styles.evidenceFact}>{safeText(fact)}</Text>}
+                        {!!url && (
+                          <Pressable onPress={() => Linking.openURL(url)} style={styles.evidenceLinkBtn}>
+                            <Text style={styles.evidenceLinkText}>자료 열기</Text>
+                          </Pressable>
+                        )}
+                      </View>
+                    );
+                  })}
+                </View>
+              )}
             </View>
           )}
+
+          <View style={[styles.verdictPill, { borderColor: factColor }]}>
+            <Text style={[styles.verdictPillText, { color: factColor }]}>{factVerdict}</Text>
+          </View>
         </View>
       </ScrollView>
+
+      <StatusBar style="light" />
     </View>
   );
 }
 
+// -------------------- STYLES --------------------
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#0b0b0b", paddingTop: 60, paddingHorizontal: 16 },
-  headerTitle: { color: "#fff", fontSize: 26, fontWeight: "900" },
-  headerSub: { color: "#888", fontSize: 13, marginBottom: 20 },
-  urlRow: { flexDirection: "row", gap: 8, marginBottom: 12 },
-  urlInput: { flex: 1, backgroundColor: "#161616", borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10, color: "#fff", borderWidth: 1, borderColor: "#222" },
-  urlBtn: { width: 55, backgroundColor: "#fff", borderRadius: 10, justifyContent: "center", alignItems: "center" },
-  urlBtnText: { fontWeight: "bold", fontSize: 12 },
-  searchRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#111', borderRadius: 8, paddingHorizontal: 10, height: 36, marginBottom: 15, borderWidth: 1, borderColor: '#1a1a1a' },
-  searchField: { flex: 1, color: '#fff', fontSize: 12 },
-  dateRow: { flexDirection: 'row', gap: 6, marginBottom: 15 },
-  dateChip: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 15, backgroundColor: '#161616' },
-  dateChipActive: { backgroundColor: '#fff' },
-  filterRow: { flexDirection: "row", gap: 6, marginBottom: 20 },
-  filterBtn: { flex: 1, paddingVertical: 8, borderRadius: 8, alignItems: "center", borderWidth: 1, borderColor: '#222' },
-  filterBtnActive: { backgroundColor: '#fff', borderColor: '#fff' },
-  filterBtnText: { color: '#666', fontWeight: 'bold', fontSize: 12 },
-  filterTextActive: { color: '#000' },
-  filterTextInactive: { color: '#666' },
-  listCard: { flexDirection: "row", gap: 12, padding: 12, borderRadius: 12, backgroundColor: "#141414", marginBottom: 10, borderWidth: 1, borderColor: '#1c1c1c' },
-  thumb: { width: 85, height: 50, borderRadius: 6 },
-  listTitle: { color: "#fff", fontSize: 14, fontWeight: "800", flex: 1 },
-  rowBetween: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  meta: { color: "#555", fontSize: 11, marginTop: 2 },
-  preview: { color: "#888", fontSize: 12, marginTop: 4 },
-  modalContainer: { flex: 1, backgroundColor: '#000', paddingTop: 40 },
-  modalTopBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 16 },
-  modalTitle: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
-  card: { padding: 16 },
-  detailTitle: { color: '#fff', fontSize: 18, fontWeight: 'bold', marginBottom: 8 },
-  body: { color: '#aaa', fontSize: 14, lineHeight: 22 },
-  gaugeWrap: { alignItems: 'center', marginVertical: 20 },
-  gaugeCenter: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, justifyContent: 'center', alignItems: 'center' },
-  centerVerdictSmall: { fontSize: 36, fontWeight: '900' },
-  analysisBox: { marginTop: 15, padding: 15, backgroundColor: '#111', borderRadius: 10, borderWidth: 1, borderColor: '#222' },
-  analysisBoxTitle: { color: '#fff', fontWeight: 'bold', marginBottom: 8 },
-  analysisBoxBullet: { color: '#ffcc66', fontSize: 13, marginBottom: 4 }
+  container: {
+    flex: 1,
+    backgroundColor: "#101114",
+    alignItems: "center",
+    justifyContent: "flex-start",
+    paddingTop: 60,
+    paddingHorizontal: 16,
+  },
+  headerTitle: { color: "#fff", fontSize: 28, fontWeight: "900" },
+  headerSub: { color: "#c6c6c6", marginTop: 4, fontSize: 14 },
+
+  urlRow: { width: "100%", flexDirection: "row", gap: 10, marginTop: 14 },
+  urlInput: {
+    flex: 1,
+    backgroundColor: "#1b1c20",
+    borderWidth: 1,
+    borderColor: "#2a2b32",
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    color: "#fff",
+    fontSize: 14,
+  },
+  urlBtn: {
+    width: 76,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#fff",
+  },
+  urlBtnText: { color: "#111", fontWeight: "900" },
+  errorText: { marginTop: 10, color: "#ff8b8b", fontSize: 12 },
+
+  searchRow: {
+    width: "100%",
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#1b1c20",
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: "#2a2b32",
+    marginTop: 12,
+  },
+  searchField: { flex: 1, color: "#fff", fontSize: 14 },
+
+  dateRow: { width: "100%", flexDirection: "row", gap: 8, marginTop: 10 },
+  chip: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "#3a3b45",
+    backgroundColor: "transparent",
+  },
+  chipActive: { backgroundColor: "#fff", borderColor: "#fff" },
+  chipText: { color: "#f0f0f0", fontWeight: "900", fontSize: 12 },
+  chipTextActive: { color: "#111" },
+
+  filterRow: { flexDirection: "row", gap: 8, marginTop: 16, width: "100%" },
+  filterBtn: { flex: 1, paddingVertical: 10, borderRadius: 999, alignItems: "center", borderWidth: 1 },
+  filterBtnActive: { backgroundColor: "#fff", borderColor: "#fff" },
+  filterBtnInactive: { backgroundColor: "transparent", borderColor: "#3a3b45" },
+  filterBtnText: { fontSize: 13, fontWeight: "900" },
+  filterTextActive: { color: "#111" },
+  filterTextInactive: { color: "#f0f0f0" },
+
+  listCard: {
+    flexDirection: "row",
+    gap: 12,
+    padding: 12,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "#2b2c35",
+    marginBottom: 12,
+    backgroundColor: "#1a1b20",
+  },
+  thumb: { width: 96, height: 54, borderRadius: 12, backgroundColor: "#2a2a2a" },
+  rowBetween: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 10 },
+  listTitle: { flex: 1, color: "#fff", fontSize: 15, fontWeight: "800" },
+  meta: { marginTop: 6, color: "#c0c0c0", fontSize: 12 },
+  preview: { marginTop: 6, color: "#ededed", fontSize: 13, lineHeight: 18 },
+  badgeBig: { paddingVertical: 6, paddingHorizontal: 12, borderRadius: 999, borderWidth: 2 },
+  badgeBigText: { fontSize: 16, fontWeight: "900" },
+
+  modalContainer: { flex: 1, backgroundColor: "#101114", paddingTop: 44 },
+  modalTopBar: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    borderBottomWidth: 1,
+    borderBottomColor: "#2a2b32",
+  },
+  modalTitle: { color: "#fff", fontSize: 20, fontWeight: "900" },
+  closeBtn: { width: 40, height: 40, borderRadius: 999, alignItems: "center", justifyContent: "center" },
+  closeText: { color: "#fff", fontSize: 22, fontWeight: "700" },
+
+  bigCard: {
+    marginTop: 16,
+    marginHorizontal: 16,
+    borderRadius: 22,
+    backgroundColor: "#2b2c2e",
+    borderWidth: 1,
+    borderColor: "#3a3b40",
+    padding: 16,
+  },
+  bigCardTitle: { color: "#fff", fontSize: 18, fontWeight: "900" },
+
+  gaugesRow: { marginTop: 18, flexDirection: "row", justifyContent: "space-between", gap: 16 },
+  gaugeCell: { flex: 1, alignItems: "center" },
+  gaugeCenterAbs: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, alignItems: "center", justifyContent: "center" },
+  gaugeMainText: { fontSize: 44, fontWeight: "900", letterSpacing: 1 },
+  gaugeLabel: { marginTop: 10, color: "#ffffff", fontSize: 16, fontWeight: "900" },
+
+  detailTopRow: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 14 },
+  detailTitle: { flex: 1, color: "#fff", fontSize: 22, fontWeight: "900", lineHeight: 28 },
+
+  playBtn: {
+    width: 58,
+    height: 58,
+    borderRadius: 999,
+    backgroundColor: "#111",
+    borderWidth: 1,
+    borderColor: "#2a2b32",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  playIcon: { color: "#fff", fontSize: 18, fontWeight: "900" },
+
+  metaLine: { marginTop: 10, color: "#d5d5d5" },
+  metaLabel: { color: "#cfcfcf", fontWeight: "900" },
+  metaValue: { color: "#e9e9e9" },
+
+  summaryText: { marginTop: 16, color: "#f0f0f0", fontSize: 16, lineHeight: 24 },
+
+  expandBtn: { marginTop: 18, alignSelf: "flex-end", paddingVertical: 8, paddingHorizontal: 10, borderRadius: 12 },
+  expandText: { color: "#e5e5e5", fontSize: 16, fontWeight: "900" },
+
+  sectionHeader: { marginTop: 6, color: "#fff", fontSize: 18, fontWeight: "900" },
+  sectionBodyMuted: { marginTop: 10, color: "#d0d0d0", fontSize: 15, lineHeight: 22 },
+
+  bulletRow: { flexDirection: "row", alignItems: "flex-start", gap: 10 },
+  bulletDot: { color: "#e8e8e8", fontSize: 18, lineHeight: 22, marginTop: 1 },
+  bulletText: { flex: 1, color: "#f0f0f0", fontSize: 16, lineHeight: 24 },
+
+  evidenceBox: {
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "#414247",
+    backgroundColor: "#242527",
+    padding: 14,
+  },
+  evidenceSource: { color: "#fff", fontSize: 14, fontWeight: "900" },
+  evidenceFact: { marginTop: 8, color: "#efefef", fontSize: 15, lineHeight: 22 },
+  evidenceLinkBtn: {
+    marginTop: 12,
+    alignSelf: "flex-start",
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#4a4b52",
+    backgroundColor: "#1a1b20",
+  },
+  evidenceLinkText: { color: "#fff", fontSize: 13, fontWeight: "900" },
+
+  verdictPill: {
+    marginTop: 18,
+    alignSelf: "flex-end",
+    borderWidth: 2,
+    paddingVertical: 10,
+    paddingHorizontal: 18,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.10)",
+  },
+  verdictPillText: { fontSize: 20, fontWeight: "900" },
 });
