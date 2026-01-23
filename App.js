@@ -1,4 +1,4 @@
-import { StatusBar } from 'expo-status-bar';
+import { StatusBar } from "expo-status-bar";
 import {
   StyleSheet,
   Text,
@@ -9,26 +9,51 @@ import {
   ScrollView,
   Linking,
   TextInput,
-  ActivityIndicator
-} from 'react-native';
-import React, { useState } from 'react';
-import Svg, { Path } from 'react-native-svg';
+  ActivityIndicator,
+} from "react-native";
+import React, { useMemo, useState } from "react";
+import Svg, { Path } from "react-native-svg";
 
-// ✅ 환경에 맞게 수정
-const API_BASE = "http://172.30.1.35:8080"; // Android Emulator 기준
-// const API_BASE = "http://localhost:8080"; // iOS Simulator
-// const API_BASE = "http://192.168.0.23:8080"; // 실제 폰(PC IP)
+/**
+ * ✅ 백엔드(팀 app.py) 기준
+ * POST /api/video/info    { url }
+ * POST /api/video/detect  { url }
+ * POST /api/video/analyze { url }
+ */
+const API_BASE = "https://uncloistral-pseudoheroical-milena.ngrok-free.dev";
+// ⚠️ 아래 같은 “POST ...” 메모 라인은 코드로 인식돼서 앱이 바로 죽음 → 절대 쓰지 말기!
+// POST `${API_BASE}/api/video/info`
+// POST `${API_BASE}/api/video/detect`
+// POST `${API_BASE}/api/video/analyze`
 
 // -------------------- UTILS --------------------
 function verdictColor(verdict) {
   if (verdict === "위험") return "#ff3b30";
   if (verdict === "주의") return "#ffcc66";
-  return "#6fe3a5";
+  if (verdict === "안전") return "#6fe3a5";
+  return "#9aa0a6";
 }
+
 function verdictProgress(verdict) {
   if (verdict === "안전") return 1.0;
   if (verdict === "주의") return 0.66;
-  return 0.33;
+  if (verdict === "위험") return 0.33;
+  return 0.5;
+}
+
+// ✅ AI 생성률(낮음/중간/높음)
+function aiLevelFromRate(ratePercent) {
+  if (ratePercent == null) return "중간";
+  if (ratePercent >= 60) return "높음";
+  if (ratePercent >= 30) return "중간";
+  return "낮음";
+}
+
+function aiLevelColor(level) {
+  if (level === "높음") return "#ff3b30";
+  if (level === "중간") return "#ffcc66";
+  if (level === "낮음") return "#6fe3a5";
+  return "#9aa0a6";
 }
 
 function polarToCartesian(cx, cy, r, angleDeg) {
@@ -52,8 +77,8 @@ async function fetchJson(url, options) {
     const json = JSON.parse(text);
     if (!res.ok) throw new Error(json.message || `HTTP ${res.status}`);
     return json;
-  } catch (e) {
-    throw new Error(`Not JSON response (HTTP ${res.status}). head=${text.slice(0, 80)}`);
+  } catch {
+    throw new Error(`Not JSON response (HTTP ${res.status}). head=${text.slice(0, 120)}`);
   }
 }
 
@@ -76,20 +101,11 @@ function parsePercentString(p) {
   return Number.isFinite(n) ? n : null;
 }
 
-// ✅ NPR ai_generation_rate 기준으로 verdict 결정 (필요하면 기준 조정)
-function verdictFromAiRate(ratePercent) {
-  if (ratePercent == null) return "주의";
-  if (ratePercent >= 60) return "위험";
-  if (ratePercent >= 30) return "주의";
-  return "안전";
-}
-
 function normalizeVerdict(v) {
   if (v === "안전" || v === "주의" || v === "위험") return v;
   return "주의";
 }
 
-// report가 string / dict 무엇이든 대비
 function summarizeReport(report) {
   if (!report) return "";
   if (typeof report === "string") return report.slice(0, 140);
@@ -100,32 +116,36 @@ function summarizeReport(report) {
   }
 }
 
-function prettyReport(report) {
-  if (!report) return "";
-  if (typeof report === "string") return report;
-  try {
-    return JSON.stringify(report, null, 2);
-  } catch {
-    return String(report);
-  }
-}
-
-// -------------------- GEMINI JSON RENDER UTILS --------------------
 function isObj(v) {
   return v && typeof v === "object" && !Array.isArray(v);
 }
 function safeText(v) {
   if (v == null) return "";
   if (typeof v === "string") return v;
-  try { return JSON.stringify(v, null, 2); } catch { return String(v); }
+  try {
+    return JSON.stringify(v, null, 2);
+  } catch {
+    return String(v);
+  }
 }
 
-// -------------------- API PIPELINE (팀 백엔드 app.py 기준) --------------------
-// ✅ /api/video/info    : 메타데이터(제목/썸네일/게시일 등)
-// ✅ /api/video/detect  : NPR 딥페이크 분석(생성률)
-// ✅ /api/video/analyze : 자막+Gemini 분석(JSON)
+function formatKST(isoLike) {
+  try {
+    const d = new Date(isoLike);
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mi = String(d.getMinutes()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
+  } catch {
+    return String(isoLike);
+  }
+}
+
+// -------------------- API PIPELINE --------------------
 async function pipelineAnalyze(youtubeUrl) {
-  // 1) 영상 메타
+  // 1) info
   let info = null;
   try {
     info = await fetchJson(`${API_BASE}/api/video/info`, {
@@ -137,7 +157,7 @@ async function pipelineAnalyze(youtubeUrl) {
     info = { status: "error", message: String(e.message || e), data: null };
   }
 
-  // 2) NPR 딥페이크 분석
+  // 2) detect
   let detect = null;
   try {
     detect = await fetchJson(`${API_BASE}/api/video/detect`, {
@@ -149,7 +169,7 @@ async function pipelineAnalyze(youtubeUrl) {
     detect = { status: "error", message: String(e.message || e), data: null };
   }
 
-  // 3) Gemini(자막 기반) 분석
+  // 3) analyze (gemini)
   let analyze = null;
   try {
     analyze = await fetchJson(`${API_BASE}/api/video/analyze`, {
@@ -161,7 +181,6 @@ async function pipelineAnalyze(youtubeUrl) {
     analyze = { status: "error", message: String(e.message || e), data: null };
   }
 
-  // -------------------- 데이터 추출 --------------------
   const infoData = info?.data ?? null;
   const detectData = detect?.data ?? null;
   const analyzeData = analyze?.data ?? null;
@@ -172,34 +191,38 @@ async function pipelineAnalyze(youtubeUrl) {
     analyzeData?.video_id ||
     extractYouTubeId(youtubeUrl);
 
-  // ✅ 제목: info에서 가져오기
   const title = infoData?.title || (videoId ? `(${videoId})` : "(unknown)");
-
-  // ✅ 썸네일: info 우선, 없으면 유튜브 기본 썸네일
   const thumbnail =
     infoData?.thumbnail_url ||
     (videoId ? `https://img.youtube.com/vi/${videoId}/hqdefault.jpg` : null);
 
-  // ✅ Gemini 결과(JSON): analysis_result
+  const publishedAt = infoData?.published_at || null;
+
   const report = analyzeData?.analysis_result ?? null;
 
-  // ✅ verdict: reliability_level만
-  const verdict =
-    (isObj(report) && report?.reliability_level)
+  const reliabilityLevel =
+    isObj(report) && report?.reliability_level
       ? normalizeVerdict(report.reliability_level)
-      : verdictFromAiRate(parsePercentString(detectData?.detection_result?.confidence_score));
+      : null;
 
-  // ✅ summary: JSON의 summary 우선
+  const aiRate = parsePercentString(detectData?.detection_result?.confidence_score);
+  const aiLevel = aiLevelFromRate(aiRate);
+  const aiProgress = aiRate == null ? 0.5 : Math.max(0, Math.min(1, aiRate / 100));
+
+  // ✅ 리스트 verdict는 reliability_level만 (요청사항)
+  const verdict = reliabilityLevel || "주의";
+
   const summary =
-    (isObj(report) && report?.summary)
+    isObj(report) && report?.summary
       ? String(report.summary)
-      : (report ? summarizeReport(report) : "");
+      : report
+        ? summarizeReport(report)
+        : "";
 
-  // ✅ 분석 상태
   const analysisStatus =
-    (info?.status === "success" && detect?.status === "success" && analyze?.status === "success")
+    info?.status === "success" && detect?.status === "success" && analyze?.status === "success"
       ? "Done"
-      : (info?.status === "error" || detect?.status === "error" || analyze?.status === "error")
+      : info?.status === "error" || detect?.status === "error" || analyze?.status === "error"
         ? "분석 실패"
         : "Done";
 
@@ -207,9 +230,14 @@ async function pipelineAnalyze(youtubeUrl) {
     videoId,
     title,
     thumbnail,
+    publishedAt,
     verdict,
     summary,
     analysisStatus,
+    aiRate,
+    aiLevel,
+    aiProgress,
+    report,
     raw: { info, detect, analyze },
   };
 }
@@ -219,107 +247,124 @@ function FilterButton({ label, active, onPress }) {
   return (
     <Pressable
       onPress={onPress}
-      style={[
-        styles.filterBtn,
-        active ? styles.filterBtnActive : styles.filterBtnInactive
-      ]}
+      style={[styles.filterBtn, active ? styles.filterBtnActive : styles.filterBtnInactive]}
     >
-      <Text
-        style={[
-          styles.filterBtnText,
-          active ? styles.filterTextActive : styles.filterTextInactive
-        ]}
-      >
+      <Text style={[styles.filterBtnText, active ? styles.filterTextActive : styles.filterTextInactive]}>
         {label}
       </Text>
     </Pressable>
   );
 }
 
-function LinkIconButton({ onPress }) {
+function ChipButton({ label, active, onPress }) {
   return (
-    <Pressable onPress={onPress} style={styles.linkIconBtn}>
-      <Text style={styles.linkIcon}>▶</Text>
+    <Pressable onPress={onPress} style={[styles.chip, active && styles.chipActive]}>
+      <Text style={[styles.chipText, active && styles.chipTextActive]}>{label}</Text>
     </Pressable>
   );
 }
 
-function TrustGauge({ verdict }) {
-  const color = verdictColor(verdict);
-  const progress = verdictProgress(verdict);
-
-  const size = 210;
+// ✅ 피그마 느낌: 게이지 하나짜리(라벨/중앙 텍스트)
+function MiniGauge({ label, mainText, color, progress }) {
+  const size = 190;
   const stroke = 18;
   const pad = 12;
   const cx = size / 2;
   const cy = size / 2;
   const r = size / 2 - stroke / 2 - pad;
 
-  // “∩ 모양” arc
   const startA = -120;
   const endA = 120;
-  const totalSweep = endA - startA;
-  const progEnd = startA + totalSweep * progress;
+  const progEnd = startA + (endA - startA) * progress;
 
   const bgPath = arcPath(cx, cy, r, startA, endA);
   const fgPath = arcPath(cx, cy, r, startA, progEnd);
 
   return (
-    <View style={styles.card}>
-      <Text style={styles.cardTitle}>광고 신뢰도</Text>
+    <View style={styles.gaugeCell}>
+      <View style={{ width: size, height: size }}>
+        <Svg width="100%" height="100%" viewBox={`0 0 ${size} ${size}`}>
+          <Path
+            d={bgPath}
+            stroke="rgba(255,255,255,0.30)"
+            strokeWidth={stroke}
+            strokeLinecap="round"
+            fill="none"
+          />
+          <Path
+            d={fgPath}
+            stroke={color}
+            strokeWidth={stroke}
+            strokeLinecap="round"
+            fill="none"
+          />
+        </Svg>
 
-      <View style={[styles.gaugeWrap, { alignItems: "center", justifyContent: "center" }]}>
-        <View style={{ width: size, height: size }}>
-          <Svg width="100%" height="100%" viewBox={`0 0 ${size} ${size}`}>
-            <Path
-              d={bgPath}
-              stroke="rgba(255,255,255,0.22)"
-              strokeWidth={stroke}
-              strokeLinecap="round"
-              fill="none"
-            />
-            <Path
-              d={fgPath}
-              stroke={color}
-              strokeWidth={stroke}
-              strokeLinecap="round"
-              fill="none"
-            />
-          </Svg>
-
-          <View style={styles.gaugeCenterAbs}>
-            <Text style={[styles.centerVerdictSmall, { color }]}>{verdict}</Text>
-          </View>
+        <View style={styles.gaugeCenterAbs}>
+          <Text style={[styles.gaugeMainText, { color }]}>{mainText}</Text>
         </View>
       </View>
+
+      <Text style={styles.gaugeLabel}>{label}</Text>
     </View>
   );
 }
 
-// -------------------- APP --------------------
+// -------------------- MAIN APP --------------------
 export default function App() {
   const [screen, setScreen] = useState("list"); // list | detail
   const [selected, setSelected] = useState(null);
-  const [filter, setFilter] = useState("전체");
-  const [showEvidence, setShowEvidence] = useState(false);
 
   const [reports, setReports] = useState([]);
   const [urlInput, setUrlInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [errorText, setErrorText] = useState("");
 
-  const filteredReports =
-    filter === "전체" ? reports : reports.filter(r => r.verdict === filter);
+  // 검색 + 기간 + 카테고리 필터
+  const [filter, setFilter] = useState("전체");
+  const [searchText, setSearchText] = useState("");
+  const [dateFilter, setDateFilter] = useState("전체");
+
+  // 상세 드롭다운
+  const [expanded, setExpanded] = useState(false);
+
+  const filteredReports = useMemo(() => {
+    const now = new Date();
+    const todayStr = now.toISOString().split("T")[0];
+    const oneWeekAgo = new Date();
+    oneWeekAgo.setDate(now.getDate() - 7);
+
+    return reports
+      .filter((item) => {
+        const title = (item.title || "").toLowerCase();
+        const matchSearch = title.includes(searchText.toLowerCase());
+        const matchCategory = filter === "전체" || item.verdict === filter;
+
+        const t = item.createdAtISO ? new Date(item.createdAtISO) : new Date(0);
+        let matchDate = true;
+
+        if (dateFilter === "오늘") {
+          const itemDay = t.toISOString().split("T")[0];
+          matchDate = itemDay === todayStr;
+        } else if (dateFilter === "1주일") {
+          matchDate = t >= oneWeekAgo && t <= now;
+        }
+
+        return matchSearch && matchCategory && matchDate;
+      })
+      .sort((a, b) => new Date(b.createdAtISO || 0) - new Date(a.createdAtISO || 0));
+  }, [reports, searchText, filter, dateFilter]);
 
   const openDetail = (item) => {
     setSelected(item);
-    setShowEvidence(false);
+    setExpanded(false);
     setScreen("detail");
   };
 
   const goBack = () => {
     setScreen("list");
     setSelected(null);
+    setExpanded(false);
   };
 
   async function onAddUrl() {
@@ -329,59 +374,72 @@ export default function App() {
     setLoading(true);
     setErrorText("");
 
-    // 1) UX: 분석중 카드 먼저 추가
+    const nowIso = new Date().toISOString();
+
     const tempId = `tmp-${Date.now()}`;
     const tempVideoId = extractYouTubeId(url);
 
     const tempItem = {
       id: tempId,
+      video_id: tempVideoId || null,
       title: "분석 중...",
-      createdAt: new Date().toISOString().replace("T", " ").slice(0, 16),
+      createdAtISO: nowIso,
       youtubeUrl: url,
       thumbnail: tempVideoId ? `https://img.youtube.com/vi/${tempVideoId}/hqdefault.jpg` : null,
       verdict: "주의",
       summary: "",
       analysisStatus: "분석중",
+      publishedAt: null,
+      aiLevel: "중간",
+      aiRate: null,
+      aiProgress: 0.5,
+      report: null,
       raw: { status: "processing" },
     };
 
-    setReports(prev => [tempItem, ...prev]);
+    setReports((prev) => [tempItem, ...prev]);
 
     try {
-      const { videoId, title, thumbnail, verdict, summary, analysisStatus, raw } =
-        await pipelineAnalyze(url);
+      const result = await pipelineAnalyze(url);
 
       const finalItem = {
         id: `r-${Date.now()}`,
-        title, // ✅ 영상 제목
-        createdAt: new Date().toISOString().replace("T", " ").slice(0, 16),
+        video_id: result.videoId,
+        title: result.title,
+        createdAtISO: nowIso, // ✅ 필터/정렬 기준은 검사시각
         youtubeUrl: url,
-        thumbnail: thumbnail || tempItem.thumbnail,
-        verdict,
-        summary,
-        analysisStatus: analysisStatus || "Done",
-        raw: { videoId, ...raw },
+        thumbnail: result.thumbnail || tempItem.thumbnail,
+        verdict: result.verdict,
+        summary: result.summary,
+        analysisStatus: result.analysisStatus,
+
+        publishedAt: result.publishedAt,
+        aiLevel: result.aiLevel,       // ✅ 여기!
+        aiRate: result.aiRate,
+        aiProgress: result.aiProgress,
+        report: result.report,
+
+        raw: result.raw,
       };
 
-      // tempItem 교체
-      setReports(prev => {
-        const withoutTemp = prev.filter(x => x.id !== tempId);
+      setReports((prev) => {
+        const withoutTemp = prev.filter((x) => x.id !== tempId);
         return [finalItem, ...withoutTemp];
       });
 
       setUrlInput("");
     } catch (e) {
-      setReports(prev =>
-        prev.map(x =>
+      setReports((prev) =>
+        prev.map((x) =>
           x.id === tempId
             ? {
-              ...x,
-              title: "분석 실패",
-              verdict: "위험",
-              summary: String(e.message || e),
-              analysisStatus: "분석 실패",
-              raw: { status: "error" },
-            }
+                ...x,
+                title: "분석 실패",
+                verdict: "위험",
+                summary: String(e.message || e),
+                analysisStatus: "분석 실패",
+                raw: { status: "error" },
+              }
             : x
         )
       );
@@ -391,13 +449,13 @@ export default function App() {
     }
   }
 
+  // -------------------- LIST SCREEN --------------------
   if (screen === "list") {
     return (
       <View style={styles.container}>
         <Text style={styles.headerTitle}>AD Astra</Text>
         <Text style={styles.headerSub}>검사 기록</Text>
 
-        {/* ✅ URL 입력 */}
         <View style={styles.urlRow}>
           <TextInput
             value={urlInput}
@@ -408,22 +466,34 @@ export default function App() {
             autoCapitalize="none"
             autoCorrect={false}
           />
-          <Pressable
-            onPress={onAddUrl}
-            style={[styles.urlBtn, loading && { opacity: 0.6 }]}
-            disabled={loading}
-          >
+          <Pressable onPress={onAddUrl} style={[styles.urlBtn, loading && { opacity: 0.6 }]} disabled={loading}>
             {loading ? <ActivityIndicator /> : <Text style={styles.urlBtnText}>추가</Text>}
           </Pressable>
         </View>
 
         {!!errorText && <Text style={styles.errorText}>{errorText}</Text>}
 
+        <View style={styles.searchRow}>
+          <Text style={{ color: "#bdbdbd", marginRight: 8 }}>🔍</Text>
+          <TextInput
+            value={searchText}
+            onChangeText={setSearchText}
+            placeholder="제목 검색"
+            placeholderTextColor="#8a8a8a"
+            style={styles.searchField}
+          />
+        </View>
+
+        <View style={styles.dateRow}>
+          {["전체", "오늘", "1주일"].map((d) => (
+            <ChipButton key={d} label={d} active={dateFilter === d} onPress={() => setDateFilter(d)} />
+          ))}
+        </View>
+
         <View style={styles.filterRow}>
-          <FilterButton label="전체" active={filter === "전체"} onPress={() => setFilter("전체")} />
-          <FilterButton label="위험" active={filter === "위험"} onPress={() => setFilter("위험")} />
-          <FilterButton label="주의" active={filter === "주의"} onPress={() => setFilter("주의")} />
-          <FilterButton label="안전" active={filter === "안전"} onPress={() => setFilter("안전")} />
+          {["전체", "위험", "주의", "안전"].map((l) => (
+            <FilterButton key={l} label={l} active={filter === l} onPress={() => setFilter(l)} />
+          ))}
         </View>
 
         <FlatList
@@ -438,22 +508,28 @@ export default function App() {
                 {item.thumbnail ? (
                   <Image source={{ uri: item.thumbnail }} style={styles.thumb} />
                 ) : (
-                  <View style={styles.thumb} />
+                  <View style={[styles.thumb, { justifyContent: "center", alignItems: "center" }]}>
+                    <ActivityIndicator size="small" />
+                  </View>
                 )}
 
                 <View style={{ flex: 1 }}>
                   <View style={styles.rowBetween}>
-                    <Text style={styles.listTitle} numberOfLines={2}>{item.title}</Text>
+                    <Text style={styles.listTitle} numberOfLines={2}>
+                      {item.title}
+                    </Text>
                     <View style={[styles.badgeBig, { borderColor: color }]}>
                       <Text style={[styles.badgeBigText, { color }]}>{item.verdict}</Text>
                     </View>
                   </View>
 
-                  <Text style={styles.meta}>{item.createdAt}</Text>
+                  <Text style={styles.meta}>검사: {item.createdAtISO ? formatKST(item.createdAtISO) : "(없음)"}</Text>
                   <Text style={styles.meta}>상태: {item.analysisStatus || "Done"}</Text>
 
                   {!!item.summary && (
-                    <Text style={styles.preview} numberOfLines={2}>{item.summary}</Text>
+                    <Text style={styles.preview} numberOfLines={2}>
+                      {item.summary}
+                    </Text>
                   )}
                 </View>
               </Pressable>
@@ -461,9 +537,7 @@ export default function App() {
           }}
           ListEmptyComponent={
             <View style={{ marginTop: 30, opacity: 0.85 }}>
-              <Text style={{ color: "#bdbdbd" }}>
-                아직 분석 기록이 없습니다. URL을 추가해보세요.
-              </Text>
+              <Text style={{ color: "#bdbdbd" }}>아직 분석 기록이 없습니다. URL을 추가해보세요.</Text>
             </View>
           }
         />
@@ -473,8 +547,17 @@ export default function App() {
     );
   }
 
-  const vColor = verdictColor(selected?.verdict || "주의");
-  const analyzeResult = selected?.raw?.analyze?.data?.analysis_result;
+  // -------------------- DETAIL SCREEN --------------------
+  const factVerdict = selected?.verdict || "주의";
+  const factColor = verdictColor(factVerdict);
+
+  const aiLevel = selected?.aiLevel || "중간";
+  const aiColor = aiLevelColor(aiLevel); // ✅ 수정: AI 레벨 컬러 함수 사용
+  const aiProgress = typeof selected?.aiProgress === "number" ? selected.aiProgress : 0.5;
+
+  const report = selected?.report;
+  const issues = isObj(report) && Array.isArray(report.issues) ? report.issues : [];
+  const evidence = isObj(report) && Array.isArray(report.evidence) ? report.evidence : [];
 
   return (
     <View style={styles.modalContainer}>
@@ -489,141 +572,120 @@ export default function App() {
         </Pressable>
       </View>
 
-      <ScrollView style={{ width: "100%" }} contentContainerStyle={{ paddingBottom: 60 }}>
-        <TrustGauge verdict={selected?.verdict || "주의"} />
+      <ScrollView style={{ width: "100%" }} contentContainerStyle={{ paddingBottom: 70 }}>
+        <View style={styles.bigCard}>
+          <Text style={styles.bigCardTitle}>광고 신뢰도</Text>
 
-        <View style={styles.card}>
-          <View style={styles.rowBetween}>
-            <Text style={styles.detailTitle} numberOfLines={2}>{selected?.title}</Text>
-            <LinkIconButton
-              onPress={() => selected?.youtubeUrl && Linking.openURL(selected.youtubeUrl)}
+          <View style={styles.gaugesRow}>
+            <MiniGauge
+              label="사실 확인"
+              mainText={factVerdict}
+              color={factColor}
+              progress={verdictProgress(factVerdict)}
+            />
+            <MiniGauge
+              label="AI 생성률"
+              mainText={aiLevel}
+              color={aiColor}
+              progress={aiProgress}
             />
           </View>
+        </View>
 
-          <Text style={styles.meta}>{selected?.createdAt}</Text>
-          <Text style={styles.meta}>상태: {selected?.analysisStatus || "Done"}</Text>
+        <View style={styles.bigCard}>
+          <View style={styles.detailTopRow}>
+            <Text style={styles.detailTitle} numberOfLines={2}>
+              {selected?.title}
+            </Text>
 
-          {/* ✅ summary는 JSON summary를 쓰도록 pipeline에서 맞춰둠 */}
-          {!!selected?.summary && <Text style={styles.body}>{selected.summary}</Text>}
+            <Pressable
+              onPress={() => selected?.youtubeUrl && Linking.openURL(selected.youtubeUrl)}
+              style={styles.playBtn}
+            >
+              <Text style={styles.playIcon}>▶</Text>
+            </Pressable>
+          </View>
 
-          {/* ✅ Gemini JSON 박스 렌더 */}
-          {isObj(analyzeResult) && (
-            <View style={{ marginTop: 14, gap: 12 }}>
-              {!!analyzeResult.reliability_level && (
-                <View style={styles.sectionBox}>
-                  <Text style={styles.sectionBoxTitle}>판정</Text>
-                  <Text style={styles.sectionBoxBody}>{safeText(analyzeResult.reliability_level)}</Text>
-                </View>
-              )}
+          <Text style={styles.metaLine}>
+            <Text style={styles.metaLabel}>검사 시각 </Text>
+            <Text style={styles.metaValue}>
+              {selected?.createdAtISO ? formatKST(selected.createdAtISO) : "(없음)"}
+            </Text>
+          </Text>
 
-              {!!analyzeResult.summary && (
-                <View style={styles.sectionBox}>
-                  <Text style={styles.sectionBoxTitle}>요약</Text>
-                  <Text style={styles.sectionBoxBody}>{safeText(analyzeResult.summary)}</Text>
-                </View>
-              )}
+          <Text style={styles.metaLine}>
+            <Text style={styles.metaLabel}>영상 제작 </Text>
+            <Text style={styles.metaValue}>
+              {selected?.publishedAt ? formatKST(selected.publishedAt) : "(없음)"}
+            </Text>
+          </Text>
 
-              {Array.isArray(analyzeResult.issues) && analyzeResult.issues.length > 0 && (
-                <View style={styles.sectionBox}>
-                  <Text style={styles.sectionBoxTitle}>주요 문제점</Text>
-                  <View style={{ marginTop: 8, gap: 6 }}>
-                    {analyzeResult.issues.map((it, idx) => (
-                      <View key={`iss-${idx}`} style={styles.bulletRow}>
-                        <Text style={styles.bulletDot}>•</Text>
-                        <Text style={styles.bulletText}>{safeText(it)}</Text>
-                      </View>
-                    ))}
-                  </View>
-                </View>
-              )}
+          <Text style={styles.metaLine}>
+            <Text style={styles.metaLabel}>검사 상태 </Text>
+            <Text style={styles.metaValue}>{selected?.analysisStatus || "Done"}</Text>
+          </Text>
 
-              {isObj(analyzeResult.patent_check) && (
-                <View style={styles.sectionBox}>
-                  <Text style={styles.sectionBoxTitle}>특허/검증</Text>
+          {!!selected?.summary && <Text style={styles.summaryText}>{selected.summary}</Text>}
 
-                  {!!analyzeResult.patent_check.status && (
-                    <Text style={styles.sectionBoxBody}>
-                      <Text style={styles.sectionBoxLabel}>상태: </Text>
-                      {safeText(analyzeResult.patent_check.status)}
-                    </Text>
-                  )}
-
-                  {!!analyzeResult.patent_check.patent_number && (
-                    <Text style={styles.sectionBoxBody}>
-                      <Text style={styles.sectionBoxLabel}>특허번호: </Text>
-                      {safeText(analyzeResult.patent_check.patent_number)}
-                    </Text>
-                  )}
-
-                  {!!analyzeResult.patent_check.details && (
-                    <Text style={[styles.sectionBoxBody, { marginTop: 8 }]}>
-                      {safeText(analyzeResult.patent_check.details)}
-                    </Text>
-                  )}
-                </View>
-              )}
-
-              {Array.isArray(analyzeResult.evidence) && analyzeResult.evidence.length > 0 && (
-                <View style={styles.sectionBox}>
-                  <Text style={styles.sectionBoxTitle}>근거 자료</Text>
-
-                  <View style={{ marginTop: 8, gap: 10 }}>
-                    {analyzeResult.evidence.map((ev, idx) => {
-                      const source = ev?.source;
-                      const fact = ev?.fact;
-                      const url = ev?.url;
-
-                      return (
-                        <View key={`ev-${idx}`} style={styles.evidenceCard}>
-                          {!!source && <Text style={styles.evidenceSource}>{safeText(source)}</Text>}
-                          {!!fact && <Text style={styles.evidenceFact}>{safeText(fact)}</Text>}
-
-                          {!!url && (
-                            <Pressable onPress={() => Linking.openURL(url)} style={styles.evidenceLinkBtn}>
-                              <Text style={styles.evidenceLinkText}>자료 열기</Text>
-                            </Pressable>
-                          )}
-                        </View>
-                      );
-                    })}
-                  </View>
-                </View>
-              )}
-
-              {!!analyzeResult.consultation && (
-                <View style={styles.sectionBox}>
-                  <Text style={styles.sectionBoxTitle}>권고</Text>
-                  <Text style={styles.sectionBoxBody}>{safeText(analyzeResult.consultation)}</Text>
-                </View>
-              )}
-            </View>
-          )}
-
-          <Pressable onPress={() => setShowEvidence(!showEvidence)} style={styles.moreBtn}>
-            <Text style={styles.moreBtnText}>상세/원본 더보기 →</Text>
+          <Pressable onPress={() => setExpanded(!expanded)} style={styles.expandBtn}>
+            <Text style={styles.expandText}>
+              판정 근거 더보기 {expanded ? "▲" : "▼"}
+            </Text>
           </Pressable>
 
-          {showEvidence && (
-            <View style={{ marginTop: 10 }}>
-              <Text style={styles.sectionTitle}>원본 리포트 (Gemini)</Text>
-              <Text style={styles.bullet}>
-                {prettyReport(analyzeResult).slice(0, 2500) || "(없음)"}
-              </Text>
+          {expanded && (
+            <View style={{ marginTop: 14 }}>
+              <Text style={styles.sectionHeader}>의심 신호</Text>
+              {issues.length === 0 ? (
+                <Text style={styles.sectionBodyMuted}>표시할 의심 신호가 없습니다.</Text>
+              ) : (
+                <View style={{ marginTop: 10, gap: 10 }}>
+                  {issues.map((it, idx) => (
+                    <View key={`iss-${idx}`} style={styles.bulletRow}>
+                      <Text style={styles.bulletDot}>•</Text>
+                      <Text style={styles.bulletText}>{safeText(it)}</Text>
+                    </View>
+                  ))}
+                </View>
+              )}
 
-              <Text style={styles.sectionTitle}>NPR 결과</Text>
-              <Text style={styles.bullet}>
-                {prettyReport(selected?.raw?.detect).slice(0, 2000) || "(없음)"}
-              </Text>
+              <Text style={[styles.sectionHeader, { marginTop: 22 }]}>근거</Text>
 
-              <Text style={styles.sectionTitle}>INFO</Text>
-              <Text style={styles.bullet}>
-                {prettyReport(selected?.raw?.info).slice(0, 1200) || "(없음)"}
-              </Text>
+              {isObj(report?.patent_check) && !!report.patent_check.details && (
+                <View style={[styles.evidenceBox, { marginTop: 10 }]}>
+                  <Text style={styles.evidenceSource}>특허/검증</Text>
+                  <Text style={styles.evidenceFact}>{safeText(report.patent_check.details)}</Text>
+                </View>
+              )}
+
+              {evidence.length === 0 ? (
+                <Text style={[styles.sectionBodyMuted, { marginTop: 10 }]}>표시할 근거가 없습니다.</Text>
+              ) : (
+                <View style={{ marginTop: 10, gap: 12 }}>
+                  {evidence.map((ev, idx) => {
+                    const source = ev?.source;
+                    const fact = ev?.fact;
+                    const url = ev?.url;
+
+                    return (
+                      <View key={`ev-${idx}`} style={styles.evidenceBox}>
+                        {!!source && <Text style={styles.evidenceSource}>{safeText(source)}</Text>}
+                        {!!fact && <Text style={styles.evidenceFact}>{safeText(fact)}</Text>}
+                        {!!url && (
+                          <Pressable onPress={() => Linking.openURL(url)} style={styles.evidenceLinkBtn}>
+                            <Text style={styles.evidenceLinkText}>자료 열기</Text>
+                          </Pressable>
+                        )}
+                      </View>
+                    );
+                  })}
+                </View>
+              )}
             </View>
           )}
 
-          <View style={[styles.bigVerdictPill, { borderColor: vColor }]}>
-            <Text style={[styles.bigVerdictText, { color: vColor }]}>{selected?.verdict}</Text>
+          <View style={[styles.verdictPill, { borderColor: factColor }]}>
+            <Text style={[styles.verdictPillText, { color: factColor }]}>{factVerdict}</Text>
           </View>
         </View>
       </ScrollView>
@@ -637,22 +699,16 @@ export default function App() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#101114", // ✅ 좀 더 밝게
-    alignItems: 'center',
-    justifyContent: 'flex-start',
+    backgroundColor: "#101114",
+    alignItems: "center",
+    justifyContent: "flex-start",
     paddingTop: 60,
     paddingHorizontal: 16,
   },
   headerTitle: { color: "#fff", fontSize: 28, fontWeight: "900" },
   headerSub: { color: "#c6c6c6", marginTop: 4, fontSize: 14 },
 
-  // ✅ URL 입력 UI
-  urlRow: {
-    width: "100%",
-    flexDirection: "row",
-    gap: 10,
-    marginTop: 14,
-  },
+  urlRow: { width: "100%", flexDirection: "row", gap: 10, marginTop: 14 },
   urlInput: {
     flex: 1,
     backgroundColor: "#1b1c20",
@@ -673,6 +729,33 @@ const styles = StyleSheet.create({
   },
   urlBtnText: { color: "#111", fontWeight: "900" },
   errorText: { marginTop: 10, color: "#ff8b8b", fontSize: 12 },
+
+  searchRow: {
+    width: "100%",
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#1b1c20",
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: "#2a2b32",
+    marginTop: 12,
+  },
+  searchField: { flex: 1, color: "#fff", fontSize: 14 },
+
+  dateRow: { width: "100%", flexDirection: "row", gap: 8, marginTop: 10 },
+  chip: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "#3a3b45",
+    backgroundColor: "transparent",
+  },
+  chipActive: { backgroundColor: "#fff", borderColor: "#fff" },
+  chipText: { color: "#f0f0f0", fontWeight: "900", fontSize: 12 },
+  chipTextActive: { color: "#111" },
 
   filterRow: { flexDirection: "row", gap: 8, marginTop: 16, width: "100%" },
   filterBtn: { flex: 1, paddingVertical: 10, borderRadius: 999, alignItems: "center", borderWidth: 1 },
@@ -714,131 +797,83 @@ const styles = StyleSheet.create({
   closeBtn: { width: 40, height: 40, borderRadius: 999, alignItems: "center", justifyContent: "center" },
   closeText: { color: "#fff", fontSize: 22, fontWeight: "700" },
 
-  card: {
+  bigCard: {
     marginTop: 16,
     marginHorizontal: 16,
-    borderRadius: 18,
-    backgroundColor: "#1f2024", // ✅ 좀 더 밝게
+    borderRadius: 22,
+    backgroundColor: "#2b2c2e",
     borderWidth: 1,
-    borderColor: "#2e2f35",
+    borderColor: "#3a3b40",
     padding: 16,
   },
-  cardTitle: { color: "#fff", fontSize: 18, fontWeight: "900" },
+  bigCardTitle: { color: "#fff", fontSize: 18, fontWeight: "900" },
 
-  gaugeWrap: { marginTop: 12, alignSelf: "center", overflow: "hidden" },
-  gaugeCenterAbs: {
-    position: "absolute",
-    left: 0, right: 0, top: 0, bottom: 0,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  centerVerdictSmall: { fontSize: 44, fontWeight: "900", letterSpacing: 1 },
+  gaugesRow: { marginTop: 18, flexDirection: "row", justifyContent: "space-between", gap: 16 },
+  gaugeCell: { flex: 1, alignItems: "center" },
+  gaugeCenterAbs: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, alignItems: "center", justifyContent: "center" },
+  gaugeMainText: { fontSize: 44, fontWeight: "900", letterSpacing: 1 },
+  gaugeLabel: { marginTop: 10, color: "#ffffff", fontSize: 16, fontWeight: "900" },
 
-  detailTitle: { color: "#fff", fontSize: 16, fontWeight: "900", flex: 1 },
-  body: { marginTop: 10, color: "#f0f0f0", fontSize: 14, lineHeight: 20 },
+  detailTopRow: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 14 },
+  detailTitle: { flex: 1, color: "#fff", fontSize: 22, fontWeight: "900", lineHeight: 28 },
 
-  sectionTitle: { marginTop: 14, color: "#fff", fontSize: 14, fontWeight: "900" },
-  bullet: { marginTop: 8, color: "#e6e6e6", fontSize: 14, lineHeight: 20 },
-
-  moreBtn: { marginTop: 16, alignSelf: "flex-end", paddingVertical: 10, paddingHorizontal: 12, borderRadius: 12 },
-  moreBtnText: { color: "#e0e0e0", fontSize: 16, fontWeight: "800" },
-
-  linkIconBtn: {
-    width: 42,
-    height: 42,
+  playBtn: {
+    width: 58,
+    height: 58,
     borderRadius: 999,
+    backgroundColor: "#111",
     borderWidth: 1,
-    borderColor: "#3a3a3a",
+    borderColor: "#2a2b32",
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#15161a",
   },
-  linkIcon: { color: "#fff", fontSize: 18, fontWeight: "900" },
+  playIcon: { color: "#fff", fontSize: 18, fontWeight: "900" },
 
-  bigVerdictPill: {
-    marginTop: 16,
-    alignSelf: "flex-end",
-    borderWidth: 2,
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-    borderRadius: 999,
-    backgroundColor: "rgba(255,255,255,0.04)",
-  },
-  bigVerdictText: { fontSize: 22, fontWeight: "900" },
+  metaLine: { marginTop: 10, color: "#d5d5d5" },
+  metaLabel: { color: "#cfcfcf", fontWeight: "900" },
+  metaValue: { color: "#e9e9e9" },
 
-  // ✅ Gemini JSON 섹션 박스 UI
-  sectionBox: {
+  summaryText: { marginTop: 16, color: "#f0f0f0", fontSize: 16, lineHeight: 24 },
+
+  expandBtn: { marginTop: 18, alignSelf: "flex-end", paddingVertical: 8, paddingHorizontal: 10, borderRadius: 12 },
+  expandText: { color: "#e5e5e5", fontSize: 16, fontWeight: "900" },
+
+  sectionHeader: { marginTop: 6, color: "#fff", fontSize: 18, fontWeight: "900" },
+  sectionBodyMuted: { marginTop: 10, color: "#d0d0d0", fontSize: 15, lineHeight: 22 },
+
+  bulletRow: { flexDirection: "row", alignItems: "flex-start", gap: 10 },
+  bulletDot: { color: "#e8e8e8", fontSize: 18, lineHeight: 22, marginTop: 1 },
+  bulletText: { flex: 1, color: "#f0f0f0", fontSize: 16, lineHeight: 24 },
+
+  evidenceBox: {
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: "#31323b",
-    backgroundColor: "#181a20",
+    borderColor: "#414247",
+    backgroundColor: "#242527",
     padding: 14,
   },
-  sectionBoxTitle: {
-    color: "#ffffff",
-    fontSize: 15,
-    fontWeight: "900",
-    marginBottom: 8,
-  },
-  sectionBoxBody: {
-    color: "#e7e7e7",
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  sectionBoxLabel: {
-    color: "#bdbdbd",
-    fontWeight: "900",
-  },
-
-  bulletRow: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    gap: 8,
-  },
-  bulletDot: {
-    color: "#d7d7d7",
-    fontSize: 16,
-    lineHeight: 20,
-    marginTop: 1,
-  },
-  bulletText: {
-    flex: 1,
-    color: "#e7e7e7",
-    fontSize: 14,
-    lineHeight: 20,
-  },
-
-  evidenceCard: {
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: "#2c2d36",
-    backgroundColor: "#121318",
-    padding: 12,
-  },
-  evidenceSource: {
-    color: "#fff",
-    fontSize: 13,
-    fontWeight: "900",
-  },
-  evidenceFact: {
-    marginTop: 6,
-    color: "#e0e0e0",
-    fontSize: 13,
-    lineHeight: 18,
-  },
+  evidenceSource: { color: "#fff", fontSize: 14, fontWeight: "900" },
+  evidenceFact: { marginTop: 8, color: "#efefef", fontSize: 15, lineHeight: 22 },
   evidenceLinkBtn: {
-    marginTop: 10,
+    marginTop: 12,
     alignSelf: "flex-start",
     paddingVertical: 8,
     paddingHorizontal: 12,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: "#3b3c46",
+    borderColor: "#4a4b52",
     backgroundColor: "#1a1b20",
   },
-  evidenceLinkText: {
-    color: "#ffffff",
-    fontSize: 13,
-    fontWeight: "900",
+  evidenceLinkText: { color: "#fff", fontSize: 13, fontWeight: "900" },
+
+  verdictPill: {
+    marginTop: 18,
+    alignSelf: "flex-end",
+    borderWidth: 2,
+    paddingVertical: 10,
+    paddingHorizontal: 18,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.10)",
   },
+  verdictPillText: { fontSize: 20, fontWeight: "900" },
 });
