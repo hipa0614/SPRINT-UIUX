@@ -11,11 +11,11 @@ import {
   TextInput,
   ActivityIndicator
 } from 'react-native';
-import React, { useMemo, useState } from 'react';
+import React, { useState } from 'react';
 import Svg, { Path } from 'react-native-svg';
 
 // ✅ 환경에 맞게 수정
-const API_BASE = "http://172.30.1.18:8080"; // Android Emulator 기준
+const API_BASE = "http://172.30.1.35:8080"; // Android Emulator 기준
 // const API_BASE = "http://localhost:8080"; // iOS Simulator
 // const API_BASE = "http://192.168.0.23:8080"; // 실제 폰(PC IP)
 
@@ -76,7 +76,7 @@ function parsePercentString(p) {
   return Number.isFinite(n) ? n : null;
 }
 
-// ✅ NPR ai_generation_rate 기준으로 verdict 결정 (필요하면 너희 기준으로 조정)
+// ✅ NPR ai_generation_rate 기준으로 verdict 결정 (필요하면 기준 조정)
 function verdictFromAiRate(ratePercent) {
   if (ratePercent == null) return "주의";
   if (ratePercent >= 60) return "위험";
@@ -91,12 +91,12 @@ function normalizeVerdict(v) {
 
 // report가 string / dict 무엇이든 대비
 function summarizeReport(report) {
-  if (!report) return "분석 결과가 없습니다.";
+  if (!report) return "";
   if (typeof report === "string") return report.slice(0, 140);
   try {
     return JSON.stringify(report).slice(0, 140);
   } catch {
-    return "분석 완료";
+    return "";
   }
 }
 
@@ -110,71 +110,107 @@ function prettyReport(report) {
   }
 }
 
-function isStructuredReport(r) {
-  return r && typeof r === "object" && r.summary && r.reliability_level;
+// -------------------- GEMINI JSON RENDER UTILS --------------------
+function isObj(v) {
+  return v && typeof v === "object" && !Array.isArray(v);
+}
+function safeText(v) {
+  if (v == null) return "";
+  if (typeof v === "string") return v;
+  try { return JSON.stringify(v, null, 2); } catch { return String(v); }
 }
 
-// -------------------- API PIPELINE (최종 app.py 기준) --------------------
-// ✅ 통합 엔드포인트 우선: /analyze-integrated (extract + npr)
-// ✅ 그리고 gemini는 별도: /analyze-youtube
+// -------------------- API PIPELINE (팀 백엔드 app.py 기준) --------------------
+// ✅ /api/video/info    : 메타데이터(제목/썸네일/게시일 등)
+// ✅ /api/video/detect  : NPR 딥페이크 분석(생성률)
+// ✅ /api/video/analyze : 자막+Gemini 분석(JSON)
 async function pipelineAnalyze(youtubeUrl) {
-  // 1) 통합 분석 (extract + npr)
-  const integrated = await fetchJson(`${API_BASE}/analyze-integrated`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url: youtubeUrl }),
-  });
-
-  // integrated 예상 응답:
-  // {
-  //   status:"success",
-  //   video_id,
-  //   storage_path,
-  //   video_path,
-  //   analysis_results:{ ai_detected_frames, ai_generation_rate },
-  //   full_data:{...}
-  // }
-
-  // 2) 자막 + Gemini 분석
-  let ay = null;
+  // 1) 영상 메타
+  let info = null;
   try {
-    ay = await fetchJson(`${API_BASE}/analyze-youtube`, {
+    info = await fetchJson(`${API_BASE}/api/video/info`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        video_url: youtubeUrl,
-        languages: ["ko", "en"],
-        // prompt: 필요하면 추가
-      }),
+      body: JSON.stringify({ url: youtubeUrl }),
     });
   } catch (e) {
-    ay = { status: "error", message: String(e.message || e), report: null };
+    info = { status: "error", message: String(e.message || e), data: null };
   }
 
-  const report = ay?.report ?? null;
+  // 2) NPR 딥페이크 분석
+  let detect = null;
+  try {
+    detect = await fetchJson(`${API_BASE}/api/video/detect`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: youtubeUrl }),
+    });
+  } catch (e) {
+    detect = { status: "error", message: String(e.message || e), data: null };
+  }
 
-  // ✅ verdict는 오직 report.reliability_level만 사용
+  // 3) Gemini(자막 기반) 분석
+  let analyze = null;
+  try {
+    analyze = await fetchJson(`${API_BASE}/api/video/analyze`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: youtubeUrl }),
+    });
+  } catch (e) {
+    analyze = { status: "error", message: String(e.message || e), data: null };
+  }
+
+  // -------------------- 데이터 추출 --------------------
+  const infoData = info?.data ?? null;
+  const detectData = detect?.data ?? null;
+  const analyzeData = analyze?.data ?? null;
+
+  const videoId =
+    infoData?.video_id ||
+    detectData?.video_id ||
+    analyzeData?.video_id ||
+    extractYouTubeId(youtubeUrl);
+
+  // ✅ 제목: info에서 가져오기
+  const title = infoData?.title || (videoId ? `(${videoId})` : "(unknown)");
+
+  // ✅ 썸네일: info 우선, 없으면 유튜브 기본 썸네일
+  const thumbnail =
+    infoData?.thumbnail_url ||
+    (videoId ? `https://img.youtube.com/vi/${videoId}/hqdefault.jpg` : null);
+
+  // ✅ Gemini 결과(JSON): analysis_result
+  const report = analyzeData?.analysis_result ?? null;
+
+  // ✅ verdict: reliability_level만
   const verdict =
-    (typeof report === "object" && report?.reliability_level)
+    (isObj(report) && report?.reliability_level)
       ? normalizeVerdict(report.reliability_level)
-      : "주의"; // fallback
+      : verdictFromAiRate(parsePercentString(detectData?.detection_result?.confidence_score));
 
+  // ✅ summary: JSON의 summary 우선
+  const summary =
+    (isObj(report) && report?.summary)
+      ? String(report.summary)
+      : (report ? summarizeReport(report) : "");
+
+  // ✅ 분석 상태
+  const analysisStatus =
+    (info?.status === "success" && detect?.status === "success" && analyze?.status === "success")
+      ? "Done"
+      : (info?.status === "error" || detect?.status === "error" || analyze?.status === "error")
+        ? "분석 실패"
+        : "Done";
 
   return {
-    videoId: integrated?.video_id || extractYouTubeId(youtubeUrl),
-    title:
-      integrated?.full_data?.video_info?.items?.[0]?.snippet?.title
-      || integrated?.full_data?.video_info?.items?.[0]?.localizations?.ko?.title
-      || "(제목 없음)",
-    storagePath: integrated?.storage_path,
-    videoPath: integrated?.video_path,
-    npr: {
-      status: integrated?.status,
-      analysis_results: integrated?.analysis_results,
-    },
-    full_data: integrated?.full_data,
-    report,
+    videoId,
+    title,
+    thumbnail,
     verdict,
+    summary,
+    analysisStatus,
+    raw: { info, detect, analyze },
   };
 }
 
@@ -213,62 +249,35 @@ function TrustGauge({ verdict }) {
   const progress = verdictProgress(verdict);
 
   const size = 210;
-  const stroke = 18;               
-  const pad = 12;                  
+  const stroke = 18;
+  const pad = 12;
   const cx = size / 2;
   const cy = size / 2;
-  const r = size / 2 - stroke / 2 - pad; 
+  const r = size / 2 - stroke / 2 - pad;
 
-  // 사진 같은 “∩ 모양” arc
+  // “∩ 모양” arc
   const startA = -120;
   const endA = 120;
-  const totalSweep = endA - startA;         // -240
+  const totalSweep = endA - startA;
   const progEnd = startA + totalSweep * progress;
 
   const bgPath = arcPath(cx, cy, r, startA, endA);
   const fgPath = arcPath(cx, cy, r, startA, progEnd);
 
-  const [barWidth, setBarWidth] = useState(0);
-
-  const markerPos = verdict === "안전" ? 0 : verdict === "주의" ? 0.5 : 1;
-  const tickSize = 14;
-  const markerSize = 16;
-
-  const leftX = 0;
-  const midX = barWidth > 0 ? (barWidth * 0.5 - tickSize / 2) : 0;
-  const rightX = barWidth > 0 ? (barWidth - tickSize) : 0;
-
-  const markerX =
-    barWidth === 0
-      ? 0
-      : markerPos === 0
-        ? 0
-        : markerPos === 0.5
-          ? (barWidth * 0.5 - markerSize / 2)
-          : (barWidth - markerSize);
-
   return (
     <View style={styles.card}>
       <Text style={styles.cardTitle}>광고 신뢰도</Text>
 
-      {/* ✅ 게이지는 정사각형 박스 안에서 완전 중앙정렬 */}
       <View style={[styles.gaugeWrap, { alignItems: "center", justifyContent: "center" }]}>
         <View style={{ width: size, height: size }}>
-          <Svg
-            width="100%"
-            height="100%"
-            viewBox={`0 0 ${size} ${size}`} // ✅ 기준 통일
-          >
-            {/* ✅ 남은 구간(회색) */}
+          <Svg width="100%" height="100%" viewBox={`0 0 ${size} ${size}`}>
             <Path
               d={bgPath}
-              stroke="rgba(255,255,255,0.25)"
+              stroke="rgba(255,255,255,0.22)"
               strokeWidth={stroke}
               strokeLinecap="round"
               fill="none"
             />
-
-            {/* ✅ 진행 구간(색) */}
             <Path
               d={fgPath}
               stroke={color}
@@ -278,43 +287,9 @@ function TrustGauge({ verdict }) {
             />
           </Svg>
 
-          {/* ✅ 텍스트는 absolute로 중앙에 덮기 */}
-          <View
-            style={{
-              position: "absolute",
-              left: 0,
-              right: 0,
-              top: 0,
-              bottom: 0,
-              alignItems: "center",
-              justifyContent: "center",
-            }}
-          >
+          <View style={styles.gaugeCenterAbs}>
             <Text style={[styles.centerVerdictSmall, { color }]}>{verdict}</Text>
           </View>
-        </View>
-      </View>
-
-      {/* 아래 스케일바는 그대로 */}
-      <View
-        style={styles.scaleWrapSmall}
-        onLayout={(e) => setBarWidth(e.nativeEvent.layout.width)}
-      >
-        <View style={styles.scaleLineSmall} />
-        <View style={[styles.tickSmall, { left: leftX, width: tickSize, height: tickSize, borderRadius: 999 }]} />
-        <View style={[styles.tickSmall, { left: midX, width: tickSize, height: tickSize, borderRadius: 999 }]} />
-        <View style={[styles.tickSmall, { left: rightX, width: tickSize, height: tickSize, borderRadius: 999 }]} />
-        <View style={[styles.markerSmall, { left: markerX, width: markerSize, height: markerSize, borderRadius: 999 }]} />
-        <View style={styles.scaleLabelsSmall}>
-          <Text style={[styles.scaleTextSmall, verdict === "안전" && { color: verdictColor("안전"), fontWeight: "900" }]}>
-            안전
-          </Text>
-          <Text style={[styles.scaleTextSmall, verdict === "주의" && { color: verdictColor("주의"), fontWeight: "900" }]}>
-            주의
-          </Text>
-          <Text style={[styles.scaleTextSmall, verdict === "위험" && { color: verdictColor("위험"), fontWeight: "900" }]}>
-            위험
-          </Text>
         </View>
       </View>
     </View>
@@ -328,8 +303,7 @@ export default function App() {
   const [filter, setFilter] = useState("전체");
   const [showEvidence, setShowEvidence] = useState(false);
 
-  // ✅ 서버 통합용 state
-  const [reports, setReports] = useState([]); // MOCK_REPORTS 대신
+  const [reports, setReports] = useState([]);
   const [urlInput, setUrlInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [errorText, setErrorText] = useState("");
@@ -355,7 +329,7 @@ export default function App() {
     setLoading(true);
     setErrorText("");
 
-    // 1) UI에 "분석중" 카드 먼저 추가(UX)
+    // 1) UX: 분석중 카드 먼저 추가
     const tempId = `tmp-${Date.now()}`;
     const tempVideoId = extractYouTubeId(url);
 
@@ -366,44 +340,27 @@ export default function App() {
       youtubeUrl: url,
       thumbnail: tempVideoId ? `https://img.youtube.com/vi/${tempVideoId}/hqdefault.jpg` : null,
       verdict: "주의",
-      summary: "서버에서 데이터를 수집/분석 중입니다…",
-      flags: [],
-      evidence: [],
+      summary: "",
+      analysisStatus: "분석중",
       raw: { status: "processing" },
     };
 
     setReports(prev => [tempItem, ...prev]);
 
     try {
-      const { videoId, title, storagePath, videoPath, report, npr, full_data, verdict } =
+      const { videoId, title, thumbnail, verdict, summary, analysisStatus, raw } =
         await pipelineAnalyze(url);
-
-      const summary =
-        (typeof report === "object" && report?.summary)
-          ? report.summary
-          : "분석 요약을 불러올 수 없습니다.";
-
 
       const finalItem = {
         id: `r-${Date.now()}`,
-        title,
+        title, // ✅ 영상 제목
         createdAt: new Date().toISOString().replace("T", " ").slice(0, 16),
         youtubeUrl: url,
-        thumbnail: videoId
-          ? `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`
-          : tempItem.thumbnail,
+        thumbnail: thumbnail || tempItem.thumbnail,
         verdict,
         summary,
-        flags: [],
-        evidence: [],
-        raw: {
-          videoId,
-          storagePath,
-          videoPath,
-          report,
-          npr,
-          full_data,
-        },
+        analysisStatus: analysisStatus || "Done",
+        raw: { videoId, ...raw },
       };
 
       // tempItem 교체
@@ -422,6 +379,7 @@ export default function App() {
               title: "분석 실패",
               verdict: "위험",
               summary: String(e.message || e),
+              analysisStatus: "분석 실패",
               raw: { status: "error" },
             }
             : x
@@ -492,13 +450,17 @@ export default function App() {
                   </View>
 
                   <Text style={styles.meta}>{item.createdAt}</Text>
-                  <Text style={styles.preview} numberOfLines={2}>{item.summary}</Text>
+                  <Text style={styles.meta}>상태: {item.analysisStatus || "Done"}</Text>
+
+                  {!!item.summary && (
+                    <Text style={styles.preview} numberOfLines={2}>{item.summary}</Text>
+                  )}
                 </View>
               </Pressable>
             );
           }}
           ListEmptyComponent={
-            <View style={{ marginTop: 30, opacity: 0.8 }}>
+            <View style={{ marginTop: 30, opacity: 0.85 }}>
               <Text style={{ color: "#bdbdbd" }}>
                 아직 분석 기록이 없습니다. URL을 추가해보세요.
               </Text>
@@ -512,6 +474,7 @@ export default function App() {
   }
 
   const vColor = verdictColor(selected?.verdict || "주의");
+  const analyzeResult = selected?.raw?.analyze?.data?.analysis_result;
 
   return (
     <View style={styles.modalContainer}>
@@ -526,7 +489,7 @@ export default function App() {
         </Pressable>
       </View>
 
-      <ScrollView style={{ width: "100%" }} contentContainerStyle={{ paddingBottom: 50 }}>
+      <ScrollView style={{ width: "100%" }} contentContainerStyle={{ paddingBottom: 60 }}>
         <TrustGauge verdict={selected?.verdict || "주의"} />
 
         <View style={styles.card}>
@@ -538,79 +501,126 @@ export default function App() {
           </View>
 
           <Text style={styles.meta}>{selected?.createdAt}</Text>
-          <Text style={styles.body}>{selected?.summary}</Text>
+          <Text style={styles.meta}>상태: {selected?.analysisStatus || "Done"}</Text>
 
-          <Pressable onPress={() => setShowEvidence(!showEvidence)} style={styles.moreBtn}>
-            <Text style={styles.moreBtnText}>상세/원본 더보기 →</Text>
-          </Pressable>
+          {/* ✅ summary는 JSON summary를 쓰도록 pipeline에서 맞춰둠 */}
+          {!!selected?.summary && <Text style={styles.body}>{selected.summary}</Text>}
 
-          {showEvidence && isStructuredReport(selected?.raw?.report) && (
-            <View style={{ marginTop: 10 }}>
-
-              {/* 🔹 분석 요약 */}
-              <View style={styles.analysisBox}>
-                <Text style={styles.analysisBoxTitle}>분석 요약</Text>
-                <Text style={styles.analysisBoxText}>
-                  {selected.raw.report.summary}
-                </Text>
-              </View>
-
-              {/* 🔹 주요 문제점 */}
-              {Array.isArray(selected.raw.report.issues) && (
-                <View style={styles.analysisBox}>
-                  <Text style={styles.analysisBoxTitle}>주요 문제점</Text>
-                  {selected.raw.report.issues.map((issue, i) => (
-                    <Text key={i} style={styles.analysisBoxBullet}>
-                      • {issue}
-                    </Text>
-                  ))}
+          {/* ✅ Gemini JSON 박스 렌더 */}
+          {isObj(analyzeResult) && (
+            <View style={{ marginTop: 14, gap: 12 }}>
+              {!!analyzeResult.reliability_level && (
+                <View style={styles.sectionBox}>
+                  <Text style={styles.sectionBoxTitle}>판정</Text>
+                  <Text style={styles.sectionBoxBody}>{safeText(analyzeResult.reliability_level)}</Text>
                 </View>
               )}
 
-              {/* 🔹 특허 검증 */}
-              {selected.raw.report.patent_check && (
-                <View style={styles.analysisBox}>
-                  <Text style={styles.analysisBoxTitle}>특허 검증</Text>
-                  <Text style={styles.analysisBoxBullet}>
-                    상태: {selected.raw.report.patent_check.status}
-                  </Text>
-                  <Text style={styles.analysisBoxText}>
-                    {selected.raw.report.patent_check.details}
-                  </Text>
-                  {selected.raw.report.patent_check.patent_number && (
-                    <Text style={styles.analysisBoxBullet}>
-                      특허번호: {selected.raw.report.patent_check.patent_number}
+              {!!analyzeResult.summary && (
+                <View style={styles.sectionBox}>
+                  <Text style={styles.sectionBoxTitle}>요약</Text>
+                  <Text style={styles.sectionBoxBody}>{safeText(analyzeResult.summary)}</Text>
+                </View>
+              )}
+
+              {Array.isArray(analyzeResult.issues) && analyzeResult.issues.length > 0 && (
+                <View style={styles.sectionBox}>
+                  <Text style={styles.sectionBoxTitle}>주요 문제점</Text>
+                  <View style={{ marginTop: 8, gap: 6 }}>
+                    {analyzeResult.issues.map((it, idx) => (
+                      <View key={`iss-${idx}`} style={styles.bulletRow}>
+                        <Text style={styles.bulletDot}>•</Text>
+                        <Text style={styles.bulletText}>{safeText(it)}</Text>
+                      </View>
+                    ))}
+                  </View>
+                </View>
+              )}
+
+              {isObj(analyzeResult.patent_check) && (
+                <View style={styles.sectionBox}>
+                  <Text style={styles.sectionBoxTitle}>특허/검증</Text>
+
+                  {!!analyzeResult.patent_check.status && (
+                    <Text style={styles.sectionBoxBody}>
+                      <Text style={styles.sectionBoxLabel}>상태: </Text>
+                      {safeText(analyzeResult.patent_check.status)}
+                    </Text>
+                  )}
+
+                  {!!analyzeResult.patent_check.patent_number && (
+                    <Text style={styles.sectionBoxBody}>
+                      <Text style={styles.sectionBoxLabel}>특허번호: </Text>
+                      {safeText(analyzeResult.patent_check.patent_number)}
+                    </Text>
+                  )}
+
+                  {!!analyzeResult.patent_check.details && (
+                    <Text style={[styles.sectionBoxBody, { marginTop: 8 }]}>
+                      {safeText(analyzeResult.patent_check.details)}
                     </Text>
                   )}
                 </View>
               )}
 
-              {/* 🔹 근거 자료 */}
-              {Array.isArray(selected.raw.report.evidence) && (
-                <View style={styles.analysisBox}>
-                  <Text style={styles.analysisBoxTitle}>근거 자료</Text>
-                  {selected.raw.report.evidence.map((ev, i) => (
-                    <Text key={i} style={styles.analysisBoxBullet}>
-                      • [{ev.source}] {ev.fact}
-                    </Text>
-                  ))}
+              {Array.isArray(analyzeResult.evidence) && analyzeResult.evidence.length > 0 && (
+                <View style={styles.sectionBox}>
+                  <Text style={styles.sectionBoxTitle}>근거 자료</Text>
+
+                  <View style={{ marginTop: 8, gap: 10 }}>
+                    {analyzeResult.evidence.map((ev, idx) => {
+                      const source = ev?.source;
+                      const fact = ev?.fact;
+                      const url = ev?.url;
+
+                      return (
+                        <View key={`ev-${idx}`} style={styles.evidenceCard}>
+                          {!!source && <Text style={styles.evidenceSource}>{safeText(source)}</Text>}
+                          {!!fact && <Text style={styles.evidenceFact}>{safeText(fact)}</Text>}
+
+                          {!!url && (
+                            <Pressable onPress={() => Linking.openURL(url)} style={styles.evidenceLinkBtn}>
+                              <Text style={styles.evidenceLinkText}>자료 열기</Text>
+                            </Pressable>
+                          )}
+                        </View>
+                      );
+                    })}
+                  </View>
                 </View>
               )}
 
-              {/* 🔹 소비자 조언 */}
-              {selected.raw.report.consultation && (
-                <View style={styles.analysisBox}>
-                  <Text style={styles.analysisBoxTitle}>소비자 조언</Text>
-                  <Text style={styles.analysisBoxText}>
-                    {selected.raw.report.consultation}
-                  </Text>
+              {!!analyzeResult.consultation && (
+                <View style={styles.sectionBox}>
+                  <Text style={styles.sectionBoxTitle}>권고</Text>
+                  <Text style={styles.sectionBoxBody}>{safeText(analyzeResult.consultation)}</Text>
                 </View>
               )}
-
             </View>
           )}
 
+          <Pressable onPress={() => setShowEvidence(!showEvidence)} style={styles.moreBtn}>
+            <Text style={styles.moreBtnText}>상세/원본 더보기 →</Text>
+          </Pressable>
 
+          {showEvidence && (
+            <View style={{ marginTop: 10 }}>
+              <Text style={styles.sectionTitle}>원본 리포트 (Gemini)</Text>
+              <Text style={styles.bullet}>
+                {prettyReport(analyzeResult).slice(0, 2500) || "(없음)"}
+              </Text>
+
+              <Text style={styles.sectionTitle}>NPR 결과</Text>
+              <Text style={styles.bullet}>
+                {prettyReport(selected?.raw?.detect).slice(0, 2000) || "(없음)"}
+              </Text>
+
+              <Text style={styles.sectionTitle}>INFO</Text>
+              <Text style={styles.bullet}>
+                {prettyReport(selected?.raw?.info).slice(0, 1200) || "(없음)"}
+              </Text>
+            </View>
+          )}
 
           <View style={[styles.bigVerdictPill, { borderColor: vColor }]}>
             <Text style={[styles.bigVerdictText, { color: vColor }]}>{selected?.verdict}</Text>
@@ -627,14 +637,14 @@ export default function App() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#0b0b0b",
+    backgroundColor: "#101114", // ✅ 좀 더 밝게
     alignItems: 'center',
     justifyContent: 'flex-start',
     paddingTop: 60,
     paddingHorizontal: 16,
   },
   headerTitle: { color: "#fff", fontSize: 28, fontWeight: "900" },
-  headerSub: { color: "#bdbdbd", marginTop: 4, fontSize: 14 },
+  headerSub: { color: "#c6c6c6", marginTop: 4, fontSize: 14 },
 
   // ✅ URL 입력 UI
   urlRow: {
@@ -645,9 +655,9 @@ const styles = StyleSheet.create({
   },
   urlInput: {
     flex: 1,
-    backgroundColor: "#141414",
+    backgroundColor: "#1b1c20",
     borderWidth: 1,
-    borderColor: "#1c1c1c",
+    borderColor: "#2a2b32",
     borderRadius: 14,
     paddingHorizontal: 12,
     paddingVertical: 10,
@@ -667,10 +677,10 @@ const styles = StyleSheet.create({
   filterRow: { flexDirection: "row", gap: 8, marginTop: 16, width: "100%" },
   filterBtn: { flex: 1, paddingVertical: 10, borderRadius: 999, alignItems: "center", borderWidth: 1 },
   filterBtnActive: { backgroundColor: "#fff", borderColor: "#fff" },
-  filterBtnInactive: { backgroundColor: "transparent", borderColor: "#2a2a2a" },
+  filterBtnInactive: { backgroundColor: "transparent", borderColor: "#3a3b45" },
   filterBtnText: { fontSize: 13, fontWeight: "900" },
   filterTextActive: { color: "#111" },
-  filterTextInactive: { color: "#eaeaea" },
+  filterTextInactive: { color: "#f0f0f0" },
 
   listCard: {
     flexDirection: "row",
@@ -678,19 +688,19 @@ const styles = StyleSheet.create({
     padding: 12,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: "#1c1c1c",
+    borderColor: "#2b2c35",
     marginBottom: 12,
-    backgroundColor: "#141414",
+    backgroundColor: "#1a1b20",
   },
-  thumb: { width: 96, height: 54, borderRadius: 12, backgroundColor: "#222" },
+  thumb: { width: 96, height: 54, borderRadius: 12, backgroundColor: "#2a2a2a" },
   rowBetween: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 10 },
   listTitle: { flex: 1, color: "#fff", fontSize: 15, fontWeight: "800" },
-  meta: { marginTop: 6, color: "#a6a6a6", fontSize: 12 },
-  preview: { marginTop: 6, color: "#d9d9d9", fontSize: 13, lineHeight: 18 },
+  meta: { marginTop: 6, color: "#c0c0c0", fontSize: 12 },
+  preview: { marginTop: 6, color: "#ededed", fontSize: 13, lineHeight: 18 },
   badgeBig: { paddingVertical: 6, paddingHorizontal: 12, borderRadius: 999, borderWidth: 2 },
   badgeBigText: { fontSize: 16, fontWeight: "900" },
 
-  modalContainer: { flex: 1, backgroundColor: "#0b0b0b", paddingTop: 44 },
+  modalContainer: { flex: 1, backgroundColor: "#101114", paddingTop: 44 },
   modalTopBar: {
     paddingHorizontal: 16,
     paddingVertical: 12,
@@ -698,7 +708,7 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
     borderBottomWidth: 1,
-    borderBottomColor: "#1f1f1f",
+    borderBottomColor: "#2a2b32",
   },
   modalTitle: { color: "#fff", fontSize: 20, fontWeight: "900" },
   closeBtn: { width: 40, height: 40, borderRadius: 999, alignItems: "center", justifyContent: "center" },
@@ -708,40 +718,40 @@ const styles = StyleSheet.create({
     marginTop: 16,
     marginHorizontal: 16,
     borderRadius: 18,
-    backgroundColor: "#1a1a1a",
+    backgroundColor: "#1f2024", // ✅ 좀 더 밝게
     borderWidth: 1,
-    borderColor: "#222",
+    borderColor: "#2e2f35",
     padding: 16,
   },
   cardTitle: { color: "#fff", fontSize: 18, fontWeight: "900" },
+
   gaugeWrap: { marginTop: 12, alignSelf: "center", overflow: "hidden" },
-  gaugeCenter: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, alignItems: "center", justifyContent: "center" },
+  gaugeCenterAbs: {
+    position: "absolute",
+    left: 0, right: 0, top: 0, bottom: 0,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   centerVerdictSmall: { fontSize: 44, fontWeight: "900", letterSpacing: 1 },
 
-  scaleWrapSmall: { width: "100%", marginTop: 6, paddingHorizontal: 8 },
-  scaleLineSmall: { height: 7, backgroundColor: "#7b7b7b", borderRadius: 999, opacity: 0.8 },
-  tickSmall: { position: "absolute", top: -4, backgroundColor: "#1a1a1a", borderWidth: 2, borderColor: "#9a9a9a" },
-  markerSmall: { position: "absolute", top: -6, backgroundColor: "#1a1a1a", borderWidth: 3, borderColor: "#fff" },
-  scaleLabelsSmall: { marginTop: 10, flexDirection: "row", justifyContent: "space-between" },
-  scaleTextSmall: { color: "#d0d0d0", fontSize: 16 },
-
   detailTitle: { color: "#fff", fontSize: 16, fontWeight: "900", flex: 1 },
-  body: { marginTop: 10, color: "#eaeaea", fontSize: 14, lineHeight: 20 },
+  body: { marginTop: 10, color: "#f0f0f0", fontSize: 14, lineHeight: 20 },
+
   sectionTitle: { marginTop: 14, color: "#fff", fontSize: 14, fontWeight: "900" },
-  bullet: { marginTop: 8, color: "#dcdcdc", fontSize: 14, lineHeight: 20 },
+  bullet: { marginTop: 8, color: "#e6e6e6", fontSize: 14, lineHeight: 20 },
 
   moreBtn: { marginTop: 16, alignSelf: "flex-end", paddingVertical: 10, paddingHorizontal: 12, borderRadius: 12 },
-  moreBtnText: { color: "#cfcfcf", fontSize: 16, fontWeight: "800" },
+  moreBtnText: { color: "#e0e0e0", fontSize: 16, fontWeight: "800" },
 
   linkIconBtn: {
     width: 42,
     height: 42,
     borderRadius: 999,
     borderWidth: 1,
-    borderColor: "#333",
+    borderColor: "#3a3a3a",
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#111",
+    backgroundColor: "#15161a",
   },
   linkIcon: { color: "#fff", fontSize: 18, fontWeight: "900" },
 
@@ -752,42 +762,83 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     paddingHorizontal: 14,
     borderRadius: 999,
-    backgroundColor: "rgba(255,255,255,0.03)",
+    backgroundColor: "rgba(255,255,255,0.04)",
   },
   bigVerdictText: { fontSize: 22, fontWeight: "900" },
-  analysisBox: {
-    marginTop: 14,
-    padding: 16,
+
+  // ✅ Gemini JSON 섹션 박스 UI
+  sectionBox: {
     borderRadius: 16,
-
-    // 🔹 배경을 살짝 밝게
-    backgroundColor: "#1f1f1f",
-
-    // 🔹 테두리 대비 강화
     borderWidth: 1,
-    borderColor: "#3a3a3a",
+    borderColor: "#31323b",
+    backgroundColor: "#181a20",
+    padding: 14,
   },
-
-  analysisBoxTitle: {
+  sectionBoxTitle: {
     color: "#ffffff",
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: "900",
     marginBottom: 8,
   },
-
-  analysisBoxText: {
-    // 🔹 본문 가독성 핵심
-    color: "#f0f0f0",
+  sectionBoxBody: {
+    color: "#e7e7e7",
     fontSize: 14,
-    lineHeight: 22,
+    lineHeight: 20,
+  },
+  sectionBoxLabel: {
+    color: "#bdbdbd",
+    fontWeight: "900",
   },
 
-  analysisBoxBullet: {
-    // 🔹 bullet은 살짝 강조
-    color: "#e6e6e6",
+  bulletRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+  },
+  bulletDot: {
+    color: "#d7d7d7",
+    fontSize: 16,
+    lineHeight: 20,
+    marginTop: 1,
+  },
+  bulletText: {
+    flex: 1,
+    color: "#e7e7e7",
     fontSize: 14,
-    lineHeight: 22,
+    lineHeight: 20,
+  },
+
+  evidenceCard: {
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#2c2d36",
+    backgroundColor: "#121318",
+    padding: 12,
+  },
+  evidenceSource: {
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: "900",
+  },
+  evidenceFact: {
     marginTop: 6,
+    color: "#e0e0e0",
+    fontSize: 13,
+    lineHeight: 18,
   },
-
+  evidenceLinkBtn: {
+    marginTop: 10,
+    alignSelf: "flex-start",
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#3b3c46",
+    backgroundColor: "#1a1b20",
+  },
+  evidenceLinkText: {
+    color: "#ffffff",
+    fontSize: 13,
+    fontWeight: "900",
+  },
 });
