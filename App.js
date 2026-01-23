@@ -20,11 +20,10 @@ import Svg, { Path } from "react-native-svg";
  * POST /api/video/detect  { url }
  * POST /api/video/analyze { url }
  */
-const API_BASE = "https://uncloistral-pseudoheroical-milena.ngrok-free.dev";
-// ⚠️ 아래 같은 “POST ...” 메모 라인은 코드로 인식돼서 앱이 바로 죽음 → 절대 쓰지 말기!
-// POST `${API_BASE}/api/video/info`
-// POST `${API_BASE}/api/video/detect`
-// POST `${API_BASE}/api/video/analyze`
+const API_ROOT = "https://uncloistral-pseudoheroical-milena.ngrok-free.dev";
+const EP_INFO = `${API_ROOT}/api/video/info`;
+const EP_DETECT = `${API_ROOT}/api/video/detect`;
+const EP_ANALYZE = `${API_ROOT}/api/video/analyze`;
 
 // -------------------- UTILS --------------------
 function verdictColor(verdict) {
@@ -33,34 +32,23 @@ function verdictColor(verdict) {
   if (verdict === "안전") return "#6fe3a5";
   return "#9aa0a6";
 }
-
 function verdictProgress(verdict) {
   if (verdict === "안전") return 1.0;
   if (verdict === "주의") return 0.66;
   if (verdict === "위험") return 0.33;
   return 0.5;
 }
-
-// ✅ AI 생성률(낮음/중간/높음)
-function aiLevelFromRate(ratePercent) {
-  if (ratePercent == null) return "중간";
-  if (ratePercent >= 60) return "높음";
-  if (ratePercent >= 30) return "중간";
-  return "낮음";
-}
-
-function aiLevelColor(level) {
-  if (level === "높음") return "#ff3b30";
-  if (level === "중간") return "#ffcc66";
-  if (level === "낮음") return "#6fe3a5";
-  return "#9aa0a6";
+function aiRateColor(ratePercent) {
+  if (ratePercent == null || !Number.isFinite(ratePercent)) return "#9aa0a6";
+  if (ratePercent <= 33) return "#6fe3a5";
+  if (ratePercent <= 66) return "#ffcc66";
+  return "#ff3b30";
 }
 
 function polarToCartesian(cx, cy, r, angleDeg) {
   const rad = ((angleDeg - 90) * Math.PI) / 180;
   return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
 }
-
 function arcPath(cx, cy, r, startAngle, endAngle) {
   const start = polarToCartesian(cx, cy, r, startAngle);
   const end = polarToCartesian(cx, cy, r, endAngle);
@@ -69,7 +57,6 @@ function arcPath(cx, cy, r, startAngle, endAngle) {
   return `M ${start.x} ${start.y} A ${r} ${r} 0 ${largeArc} ${sweep} ${end.x} ${end.y}`;
 }
 
-// ✅ 서버가 JSON 대신 HTML(에러페이지) 보내도 안 죽게 하는 파서
 async function fetchJson(url, options) {
   const res = await fetch(url, options);
   const text = await res.text();
@@ -81,7 +68,6 @@ async function fetchJson(url, options) {
     throw new Error(`Not JSON response (HTTP ${res.status}). head=${text.slice(0, 120)}`);
   }
 }
-
 function extractYouTubeId(url) {
   if (!url) return null;
   const m1 = url.match(/[?&]v=([^&]+)/);
@@ -92,7 +78,6 @@ function extractYouTubeId(url) {
   if (m3?.[1]) return m3[1];
   return null;
 }
-
 function parsePercentString(p) {
   if (p == null) return null;
   if (typeof p === "number") return p;
@@ -100,12 +85,10 @@ function parsePercentString(p) {
   const n = Number(s);
   return Number.isFinite(n) ? n : null;
 }
-
 function normalizeVerdict(v) {
   if (v === "안전" || v === "주의" || v === "위험") return v;
   return "주의";
 }
-
 function summarizeReport(report) {
   if (!report) return "";
   if (typeof report === "string") return report.slice(0, 140);
@@ -115,7 +98,6 @@ function summarizeReport(report) {
     return "";
   }
 }
-
 function isObj(v) {
   return v && typeof v === "object" && !Array.isArray(v);
 }
@@ -128,7 +110,6 @@ function safeText(v) {
     return String(v);
   }
 }
-
 function formatKST(isoLike) {
   try {
     const d = new Date(isoLike);
@@ -141,105 +122,6 @@ function formatKST(isoLike) {
   } catch {
     return String(isoLike);
   }
-}
-
-// -------------------- API PIPELINE --------------------
-async function pipelineAnalyze(youtubeUrl) {
-  // 1) info
-  let info = null;
-  try {
-    info = await fetchJson(`${API_BASE}/api/video/info`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: youtubeUrl }),
-    });
-  } catch (e) {
-    info = { status: "error", message: String(e.message || e), data: null };
-  }
-
-  // 2) detect
-  let detect = null;
-  try {
-    detect = await fetchJson(`${API_BASE}/api/video/detect`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: youtubeUrl }),
-    });
-  } catch (e) {
-    detect = { status: "error", message: String(e.message || e), data: null };
-  }
-
-  // 3) analyze (gemini)
-  let analyze = null;
-  try {
-    analyze = await fetchJson(`${API_BASE}/api/video/analyze`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: youtubeUrl }),
-    });
-  } catch (e) {
-    analyze = { status: "error", message: String(e.message || e), data: null };
-  }
-
-  const infoData = info?.data ?? null;
-  const detectData = detect?.data ?? null;
-  const analyzeData = analyze?.data ?? null;
-
-  const videoId =
-    infoData?.video_id ||
-    detectData?.video_id ||
-    analyzeData?.video_id ||
-    extractYouTubeId(youtubeUrl);
-
-  const title = infoData?.title || (videoId ? `(${videoId})` : "(unknown)");
-  const thumbnail =
-    infoData?.thumbnail_url ||
-    (videoId ? `https://img.youtube.com/vi/${videoId}/hqdefault.jpg` : null);
-
-  const publishedAt = infoData?.published_at || null;
-
-  const report = analyzeData?.analysis_result ?? null;
-
-  const reliabilityLevel =
-    isObj(report) && report?.reliability_level
-      ? normalizeVerdict(report.reliability_level)
-      : null;
-
-  const aiRate = parsePercentString(detectData?.detection_result?.confidence_score);
-  const aiLevel = aiLevelFromRate(aiRate);
-  const aiProgress = aiRate == null ? 0.5 : Math.max(0, Math.min(1, aiRate / 100));
-
-  // ✅ 리스트 verdict는 reliability_level만 (요청사항)
-  const verdict = reliabilityLevel || "주의";
-
-  const summary =
-    isObj(report) && report?.summary
-      ? String(report.summary)
-      : report
-        ? summarizeReport(report)
-        : "";
-
-  const analysisStatus =
-    info?.status === "success" && detect?.status === "success" && analyze?.status === "success"
-      ? "Done"
-      : info?.status === "error" || detect?.status === "error" || analyze?.status === "error"
-        ? "분석 실패"
-        : "Done";
-
-  return {
-    videoId,
-    title,
-    thumbnail,
-    publishedAt,
-    verdict,
-    summary,
-    analysisStatus,
-    aiRate,
-    aiLevel,
-    aiProgress,
-    report,
-    raw: { info, detect, analyze },
-  };
 }
 
 // -------------------- UI COMPONENTS --------------------
@@ -255,7 +137,6 @@ function FilterButton({ label, active, onPress }) {
     </Pressable>
   );
 }
-
 function ChipButton({ label, active, onPress }) {
   return (
     <Pressable onPress={onPress} style={[styles.chip, active && styles.chipActive]}>
@@ -264,7 +145,6 @@ function ChipButton({ label, active, onPress }) {
   );
 }
 
-// ✅ 피그마 느낌: 게이지 하나짜리(라벨/중앙 텍스트)
 function MiniGauge({ label, mainText, color, progress }) {
   const size = 190;
   const stroke = 18;
@@ -284,27 +164,13 @@ function MiniGauge({ label, mainText, color, progress }) {
     <View style={styles.gaugeCell}>
       <View style={{ width: size, height: size }}>
         <Svg width="100%" height="100%" viewBox={`0 0 ${size} ${size}`}>
-          <Path
-            d={bgPath}
-            stroke="rgba(255,255,255,0.30)"
-            strokeWidth={stroke}
-            strokeLinecap="round"
-            fill="none"
-          />
-          <Path
-            d={fgPath}
-            stroke={color}
-            strokeWidth={stroke}
-            strokeLinecap="round"
-            fill="none"
-          />
+          <Path d={bgPath} stroke="rgba(255,255,255,0.30)" strokeWidth={stroke} strokeLinecap="round" fill="none" />
+          <Path d={fgPath} stroke={color} strokeWidth={stroke} strokeLinecap="round" fill="none" />
         </Svg>
-
         <View style={styles.gaugeCenterAbs}>
           <Text style={[styles.gaugeMainText, { color }]}>{mainText}</Text>
         </View>
       </View>
-
       <Text style={styles.gaugeLabel}>{label}</Text>
     </View>
   );
@@ -312,7 +178,7 @@ function MiniGauge({ label, mainText, color, progress }) {
 
 // -------------------- MAIN APP --------------------
 export default function App() {
-  const [screen, setScreen] = useState("list"); // list | detail
+  const [screen, setScreen] = useState("list");
   const [selected, setSelected] = useState(null);
 
   const [reports, setReports] = useState([]);
@@ -320,12 +186,9 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [errorText, setErrorText] = useState("");
 
-  // 검색 + 기간 + 카테고리 필터
   const [filter, setFilter] = useState("전체");
   const [searchText, setSearchText] = useState("");
   const [dateFilter, setDateFilter] = useState("전체");
-
-  // 상세 드롭다운
   const [expanded, setExpanded] = useState(false);
 
   const filteredReports = useMemo(() => {
@@ -349,7 +212,6 @@ export default function App() {
         } else if (dateFilter === "1주일") {
           matchDate = t >= oneWeekAgo && t <= now;
         }
-
         return matchSearch && matchCategory && matchDate;
       })
       .sort((a, b) => new Date(b.createdAtISO || 0) - new Date(a.createdAtISO || 0));
@@ -360,12 +222,131 @@ export default function App() {
     setExpanded(false);
     setScreen("detail");
   };
-
   const goBack = () => {
     setScreen("list");
     setSelected(null);
     setExpanded(false);
   };
+
+  // ✅ tempId 카드 "부분 업데이트" 헬퍼
+  function patchReport(tempId, patch) {
+    setReports((prev) =>
+      prev.map((x) => (x.id === tempId ? { ...x, ...patch } : x))
+    );
+    // detail 보고 있을 때도 바로 반영
+    setSelected((prevSel) => (prevSel?.id === tempId ? { ...prevSel, ...patch } : prevSel));
+  }
+
+  // ✅ 병렬 요청 + 먼저 오는 것부터 UI 업데이트
+  async function startParallelUpdate(tempId, youtubeUrl) {
+    const body = JSON.stringify({ url: youtubeUrl });
+    const options = { method: "POST", headers: { "Content-Type": "application/json" }, body };
+
+    // 세 요청을 동시에 시작
+    const pInfo = fetchJson(EP_INFO, options);
+    const pDetect = fetchJson(EP_DETECT, options);
+    const pAnalyze = fetchJson(EP_ANALYZE, options);
+
+    // 1) INFO 먼저 오면: 제목/썸네일/영상 제작일 업데이트
+    pInfo
+      .then((info) => {
+        const d = info?.data || {};
+        const videoId = d.video_id || extractYouTubeId(youtubeUrl);
+        patchReport(tempId, {
+          video_id: videoId,
+          title: d.title || "제목 없음",
+          thumbnail:
+            d.thumbnail_url ||
+            (videoId ? `https://img.youtube.com/vi/${videoId}/hqdefault.jpg` : null),
+          publishedAt: d.published_at || null,
+          raw: (prevRaw) => prevRaw, // (아래에서 raw 합치려고 별도 처리 안 함)
+        });
+        // raw 합치기
+        setReports((prev) =>
+          prev.map((x) =>
+            x.id === tempId ? { ...x, raw: { ...(x.raw || {}), info } } : x
+          )
+        );
+        setSelected((prevSel) =>
+          prevSel?.id === tempId ? { ...prevSel, raw: { ...(prevSel.raw || {}), info } } : prevSel
+        );
+      })
+      .catch((e) => {
+        setReports((prev) =>
+          prev.map((x) =>
+            x.id === tempId ? { ...x, raw: { ...(x.raw || {}), info: { status: "error", message: String(e.message || e) } } } : x
+          )
+        );
+      });
+
+    // 2) DETECT 먼저 오면: AI 생성률 숫자/색/진행 업데이트
+    pDetect
+      .then((detect) => {
+        const dd = detect?.data || {};
+        const score = dd?.detection_result?.confidence_score;
+        const aiRateRaw = parsePercentString(score);
+        const aiRate = aiRateRaw == null ? null : Math.max(0, Math.min(100, aiRateRaw));
+        const aiProgress = aiRate == null ? 0.0 : aiRate / 100;
+
+        patchReport(tempId, { aiRate, aiProgress });
+        setReports((prev) =>
+          prev.map((x) =>
+            x.id === tempId ? { ...x, raw: { ...(x.raw || {}), detect } } : x
+          )
+        );
+        setSelected((prevSel) =>
+          prevSel?.id === tempId ? { ...prevSel, raw: { ...(prevSel.raw || {}), detect } } : prevSel
+        );
+      })
+      .catch((e) => {
+        setReports((prev) =>
+          prev.map((x) =>
+            x.id === tempId ? { ...x, raw: { ...(x.raw || {}), detect: { status: "error", message: String(e.message || e) } } } : x
+          )
+        );
+      });
+
+    // 3) ANALYZE 먼저 오면: 신뢰도(사실확인 verdict) / 요약 / 이슈 업데이트
+    pAnalyze
+      .then((analyze) => {
+        const ad = analyze?.data || {};
+        const report = ad?.analysis_result ?? null;
+
+        const verdict =
+          isObj(report) && report?.reliability_level
+            ? normalizeVerdict(report.reliability_level)
+            : "주의";
+
+        const summary =
+          isObj(report) && report?.summary
+            ? String(report.summary)
+            : (report ? summarizeReport(report) : "");
+
+        patchReport(tempId, { verdict, summary, report });
+
+        setReports((prev) =>
+          prev.map((x) =>
+            x.id === tempId ? { ...x, raw: { ...(x.raw || {}), analyze } } : x
+          )
+        );
+        setSelected((prevSel) =>
+          prevSel?.id === tempId ? { ...prevSel, raw: { ...(prevSel.raw || {}), analyze } } : prevSel
+        );
+      })
+      .catch((e) => {
+        setReports((prev) =>
+          prev.map((x) =>
+            x.id === tempId ? { ...x, raw: { ...(x.raw || {}), analyze: { status: "error", message: String(e.message || e) } } } : x
+          )
+        );
+      });
+
+    // ✅ 최종 완료 상태는 "셋 다 끝났을 때" 반영
+    const settled = await Promise.allSettled([pInfo, pDetect, pAnalyze]);
+
+    const anyRejected = settled.some((s) => s.status === "rejected");
+    patchReport(tempId, { analysisStatus: anyRejected ? "분석 일부 실패" : "Done" });
+  }
 
   async function onAddUrl() {
     const url = urlInput.trim();
@@ -375,7 +356,6 @@ export default function App() {
     setErrorText("");
 
     const nowIso = new Date().toISOString();
-
     const tempId = `tmp-${Date.now()}`;
     const tempVideoId = extractYouTubeId(url);
 
@@ -386,70 +366,38 @@ export default function App() {
       createdAtISO: nowIso,
       youtubeUrl: url,
       thumbnail: tempVideoId ? `https://img.youtube.com/vi/${tempVideoId}/hqdefault.jpg` : null,
+
       verdict: "주의",
-      summary: "",
+      summary: "요약 생성 중...",
       analysisStatus: "분석중",
+
       publishedAt: null,
-      aiLevel: "중간",
       aiRate: null,
-      aiProgress: 0.5,
+      aiProgress: 0.0,
       report: null,
-      raw: { status: "processing" },
+
+      raw: {},
     };
 
     setReports((prev) => [tempItem, ...prev]);
+    setUrlInput("");
 
     try {
-      const result = await pipelineAnalyze(url);
-
-      const finalItem = {
-        id: `r-${Date.now()}`,
-        video_id: result.videoId,
-        title: result.title,
-        createdAtISO: nowIso, // ✅ 필터/정렬 기준은 검사시각
-        youtubeUrl: url,
-        thumbnail: result.thumbnail || tempItem.thumbnail,
-        verdict: result.verdict,
-        summary: result.summary,
-        analysisStatus: result.analysisStatus,
-
-        publishedAt: result.publishedAt,
-        aiLevel: result.aiLevel,       // ✅ 여기!
-        aiRate: result.aiRate,
-        aiProgress: result.aiProgress,
-        report: result.report,
-
-        raw: result.raw,
-      };
-
-      setReports((prev) => {
-        const withoutTemp = prev.filter((x) => x.id !== tempId);
-        return [finalItem, ...withoutTemp];
-      });
-
-      setUrlInput("");
+      // ✅ 병렬 시작 (여기서부터 바로바로 UI 업데이트됨)
+      await startParallelUpdate(tempId, url);
     } catch (e) {
-      setReports((prev) =>
-        prev.map((x) =>
-          x.id === tempId
-            ? {
-                ...x,
-                title: "분석 실패",
-                verdict: "위험",
-                summary: String(e.message || e),
-                analysisStatus: "분석 실패",
-                raw: { status: "error" },
-              }
-            : x
-        )
-      );
+      patchReport(tempId, {
+        title: "분석 실패",
+        verdict: "위험",
+        summary: String(e.message || e),
+        analysisStatus: "분석 실패",
+      });
       setErrorText(String(e.message || e));
     } finally {
       setLoading(false);
     }
   }
 
-  // -------------------- LIST SCREEN --------------------
   if (screen === "list") {
     return (
       <View style={styles.container}>
@@ -535,11 +483,6 @@ export default function App() {
               </Pressable>
             );
           }}
-          ListEmptyComponent={
-            <View style={{ marginTop: 30, opacity: 0.85 }}>
-              <Text style={{ color: "#bdbdbd" }}>아직 분석 기록이 없습니다. URL을 추가해보세요.</Text>
-            </View>
-          }
         />
 
         <StatusBar style="light" />
@@ -547,13 +490,14 @@ export default function App() {
     );
   }
 
-  // -------------------- DETAIL SCREEN --------------------
+  // -------------------- DETAIL --------------------
   const factVerdict = selected?.verdict || "주의";
   const factColor = verdictColor(factVerdict);
 
-  const aiLevel = selected?.aiLevel || "중간";
-  const aiColor = aiLevelColor(aiLevel); // ✅ 수정: AI 레벨 컬러 함수 사용
-  const aiProgress = typeof selected?.aiProgress === "number" ? selected.aiProgress : 0.5;
+  const aiRate = selected?.aiRate;
+  const aiColor = aiRateColor(aiRate);
+  const aiProgress = typeof selected?.aiProgress === "number" ? selected.aiProgress : 0.0;
+  const aiCenterText = aiRate == null ? "--%" : `${Math.round(aiRate)}%`;
 
   const report = selected?.report;
   const issues = isObj(report) && Array.isArray(report.issues) ? report.issues : [];
@@ -577,18 +521,8 @@ export default function App() {
           <Text style={styles.bigCardTitle}>광고 신뢰도</Text>
 
           <View style={styles.gaugesRow}>
-            <MiniGauge
-              label="사실 확인"
-              mainText={factVerdict}
-              color={factColor}
-              progress={verdictProgress(factVerdict)}
-            />
-            <MiniGauge
-              label="AI 생성률"
-              mainText={aiLevel}
-              color={aiColor}
-              progress={aiProgress}
-            />
+            <MiniGauge label="사실 확인" mainText={factVerdict} color={factColor} progress={verdictProgress(factVerdict)} />
+            <MiniGauge label="AI 생성률" mainText={aiCenterText} color={aiColor} progress={aiProgress} />
           </View>
         </View>
 
@@ -598,28 +532,19 @@ export default function App() {
               {selected?.title}
             </Text>
 
-            <Pressable
-              onPress={() => selected?.youtubeUrl && Linking.openURL(selected.youtubeUrl)}
-              style={styles.playBtn}
-            >
+            <Pressable onPress={() => selected?.youtubeUrl && Linking.openURL(selected.youtubeUrl)} style={styles.playBtn}>
               <Text style={styles.playIcon}>▶</Text>
             </Pressable>
           </View>
 
           <Text style={styles.metaLine}>
             <Text style={styles.metaLabel}>검사 시각 </Text>
-            <Text style={styles.metaValue}>
-              {selected?.createdAtISO ? formatKST(selected.createdAtISO) : "(없음)"}
-            </Text>
+            <Text style={styles.metaValue}>{selected?.createdAtISO ? formatKST(selected.createdAtISO) : "(없음)"}</Text>
           </Text>
-
           <Text style={styles.metaLine}>
             <Text style={styles.metaLabel}>영상 제작 </Text>
-            <Text style={styles.metaValue}>
-              {selected?.publishedAt ? formatKST(selected.publishedAt) : "(없음)"}
-            </Text>
+            <Text style={styles.metaValue}>{selected?.publishedAt ? formatKST(selected.publishedAt) : "(없음)"}</Text>
           </Text>
-
           <Text style={styles.metaLine}>
             <Text style={styles.metaLabel}>검사 상태 </Text>
             <Text style={styles.metaValue}>{selected?.analysisStatus || "Done"}</Text>
@@ -628,9 +553,7 @@ export default function App() {
           {!!selected?.summary && <Text style={styles.summaryText}>{selected.summary}</Text>}
 
           <Pressable onPress={() => setExpanded(!expanded)} style={styles.expandBtn}>
-            <Text style={styles.expandText}>
-              판정 근거 더보기 {expanded ? "▲" : "▼"}
-            </Text>
+            <Text style={styles.expandText}>판정 근거 더보기 {expanded ? "▲" : "▼"}</Text>
           </Pressable>
 
           {expanded && (
@@ -650,14 +573,6 @@ export default function App() {
               )}
 
               <Text style={[styles.sectionHeader, { marginTop: 22 }]}>근거</Text>
-
-              {isObj(report?.patent_check) && !!report.patent_check.details && (
-                <View style={[styles.evidenceBox, { marginTop: 10 }]}>
-                  <Text style={styles.evidenceSource}>특허/검증</Text>
-                  <Text style={styles.evidenceFact}>{safeText(report.patent_check.details)}</Text>
-                </View>
-              )}
-
               {evidence.length === 0 ? (
                 <Text style={[styles.sectionBodyMuted, { marginTop: 10 }]}>표시할 근거가 없습니다.</Text>
               ) : (
@@ -666,7 +581,6 @@ export default function App() {
                     const source = ev?.source;
                     const fact = ev?.fact;
                     const url = ev?.url;
-
                     return (
                       <View key={`ev-${idx}`} style={styles.evidenceBox}>
                         {!!source && <Text style={styles.evidenceSource}>{safeText(source)}</Text>}
@@ -697,62 +611,21 @@ export default function App() {
 
 // -------------------- STYLES --------------------
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#101114",
-    alignItems: "center",
-    justifyContent: "flex-start",
-    paddingTop: 60,
-    paddingHorizontal: 16,
-  },
+  container: { flex: 1, backgroundColor: "#101114", alignItems: "center", paddingTop: 60, paddingHorizontal: 16 },
   headerTitle: { color: "#fff", fontSize: 28, fontWeight: "900" },
   headerSub: { color: "#c6c6c6", marginTop: 4, fontSize: 14 },
 
   urlRow: { width: "100%", flexDirection: "row", gap: 10, marginTop: 14 },
-  urlInput: {
-    flex: 1,
-    backgroundColor: "#1b1c20",
-    borderWidth: 1,
-    borderColor: "#2a2b32",
-    borderRadius: 14,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    color: "#fff",
-    fontSize: 14,
-  },
-  urlBtn: {
-    width: 76,
-    borderRadius: 14,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#fff",
-  },
+  urlInput: { flex: 1, backgroundColor: "#1b1c20", borderWidth: 1, borderColor: "#2a2b32", borderRadius: 14, paddingHorizontal: 12, paddingVertical: 10, color: "#fff", fontSize: 14 },
+  urlBtn: { width: 76, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: "#fff" },
   urlBtnText: { color: "#111", fontWeight: "900" },
   errorText: { marginTop: 10, color: "#ff8b8b", fontSize: 12 },
 
-  searchRow: {
-    width: "100%",
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#1b1c20",
-    borderRadius: 14,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderWidth: 1,
-    borderColor: "#2a2b32",
-    marginTop: 12,
-  },
+  searchRow: { width: "100%", flexDirection: "row", alignItems: "center", backgroundColor: "#1b1c20", borderRadius: 14, paddingHorizontal: 12, paddingVertical: 10, borderWidth: 1, borderColor: "#2a2b32", marginTop: 12 },
   searchField: { flex: 1, color: "#fff", fontSize: 14 },
 
   dateRow: { width: "100%", flexDirection: "row", gap: 8, marginTop: 10 },
-  chip: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: "#3a3b45",
-    backgroundColor: "transparent",
-  },
+  chip: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, borderWidth: 1, borderColor: "#3a3b45", backgroundColor: "transparent" },
   chipActive: { backgroundColor: "#fff", borderColor: "#fff" },
   chipText: { color: "#f0f0f0", fontWeight: "900", fontSize: 12 },
   chipTextActive: { color: "#111" },
@@ -765,16 +638,7 @@ const styles = StyleSheet.create({
   filterTextActive: { color: "#111" },
   filterTextInactive: { color: "#f0f0f0" },
 
-  listCard: {
-    flexDirection: "row",
-    gap: 12,
-    padding: 12,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: "#2b2c35",
-    marginBottom: 12,
-    backgroundColor: "#1a1b20",
-  },
+  listCard: { flexDirection: "row", gap: 12, padding: 12, borderRadius: 16, borderWidth: 1, borderColor: "#2b2c35", marginBottom: 12, backgroundColor: "#1a1b20" },
   thumb: { width: 96, height: 54, borderRadius: 12, backgroundColor: "#2a2a2a" },
   rowBetween: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 10 },
   listTitle: { flex: 1, color: "#fff", fontSize: 15, fontWeight: "800" },
@@ -784,28 +648,12 @@ const styles = StyleSheet.create({
   badgeBigText: { fontSize: 16, fontWeight: "900" },
 
   modalContainer: { flex: 1, backgroundColor: "#101114", paddingTop: 44 },
-  modalTopBar: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    borderBottomWidth: 1,
-    borderBottomColor: "#2a2b32",
-  },
+  modalTopBar: { paddingHorizontal: 16, paddingVertical: 12, flexDirection: "row", justifyContent: "space-between", alignItems: "center", borderBottomWidth: 1, borderBottomColor: "#2a2b32" },
   modalTitle: { color: "#fff", fontSize: 20, fontWeight: "900" },
   closeBtn: { width: 40, height: 40, borderRadius: 999, alignItems: "center", justifyContent: "center" },
   closeText: { color: "#fff", fontSize: 22, fontWeight: "700" },
 
-  bigCard: {
-    marginTop: 16,
-    marginHorizontal: 16,
-    borderRadius: 22,
-    backgroundColor: "#2b2c2e",
-    borderWidth: 1,
-    borderColor: "#3a3b40",
-    padding: 16,
-  },
+  bigCard: { marginTop: 16, marginHorizontal: 16, borderRadius: 22, backgroundColor: "#2b2c2e", borderWidth: 1, borderColor: "#3a3b40", padding: 16 },
   bigCardTitle: { color: "#fff", fontSize: 18, fontWeight: "900" },
 
   gaugesRow: { marginTop: 18, flexDirection: "row", justifyContent: "space-between", gap: 16 },
@@ -817,16 +665,7 @@ const styles = StyleSheet.create({
   detailTopRow: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 14 },
   detailTitle: { flex: 1, color: "#fff", fontSize: 22, fontWeight: "900", lineHeight: 28 },
 
-  playBtn: {
-    width: 58,
-    height: 58,
-    borderRadius: 999,
-    backgroundColor: "#111",
-    borderWidth: 1,
-    borderColor: "#2a2b32",
-    alignItems: "center",
-    justifyContent: "center",
-  },
+  playBtn: { width: 58, height: 58, borderRadius: 999, backgroundColor: "#111", borderWidth: 1, borderColor: "#2a2b32", alignItems: "center", justifyContent: "center" },
   playIcon: { color: "#fff", fontSize: 18, fontWeight: "900" },
 
   metaLine: { marginTop: 10, color: "#d5d5d5" },
@@ -845,35 +684,12 @@ const styles = StyleSheet.create({
   bulletDot: { color: "#e8e8e8", fontSize: 18, lineHeight: 22, marginTop: 1 },
   bulletText: { flex: 1, color: "#f0f0f0", fontSize: 16, lineHeight: 24 },
 
-  evidenceBox: {
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: "#414247",
-    backgroundColor: "#242527",
-    padding: 14,
-  },
+  evidenceBox: { borderRadius: 16, borderWidth: 1, borderColor: "#414247", backgroundColor: "#242527", padding: 14 },
   evidenceSource: { color: "#fff", fontSize: 14, fontWeight: "900" },
   evidenceFact: { marginTop: 8, color: "#efefef", fontSize: 15, lineHeight: 22 },
-  evidenceLinkBtn: {
-    marginTop: 12,
-    alignSelf: "flex-start",
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "#4a4b52",
-    backgroundColor: "#1a1b20",
-  },
+  evidenceLinkBtn: { marginTop: 12, alignSelf: "flex-start", paddingVertical: 8, paddingHorizontal: 12, borderRadius: 12, borderWidth: 1, borderColor: "#4a4b52", backgroundColor: "#1a1b20" },
   evidenceLinkText: { color: "#fff", fontSize: 13, fontWeight: "900" },
 
-  verdictPill: {
-    marginTop: 18,
-    alignSelf: "flex-end",
-    borderWidth: 2,
-    paddingVertical: 10,
-    paddingHorizontal: 18,
-    borderRadius: 999,
-    backgroundColor: "rgba(255,255,255,0.10)",
-  },
+  verdictPill: { marginTop: 18, alignSelf: "flex-end", borderWidth: 2, paddingVertical: 10, paddingHorizontal: 18, borderRadius: 999, backgroundColor: "rgba(255,255,255,0.10)" },
   verdictPillText: { fontSize: 20, fontWeight: "900" },
 });
