@@ -13,8 +13,15 @@ import {
 } from "react-native";
 import React, { useMemo, useState, useEffect } from "react"; // ✅ useEffect 추가
 import Svg, { Path } from "react-native-svg";
+import * as ExpoLinking from 'expo-linking'; // ✅ Expo Linking 추가
 
-const API_BASE = "https://uncloistral-pseudoheroical-milena.ngrok-free.dev";
+/**
+ * ✅ 백엔드(팀 app.py) 기준
+ */
+const API_ROOT = "https://uncloistral-pseudoheroical-milena.ngrok-free.dev";
+const EP_INFO = `${API_ROOT}/api/video/info`;
+const EP_DETECT = `${API_ROOT}/api/video/detect`;
+const EP_ANALYZE = `${API_ROOT}/api/video/analyze`;
 
 // -------------------- UTILS --------------------
 function verdictColor(verdict) {
@@ -23,33 +30,23 @@ function verdictColor(verdict) {
   if (verdict === "안전") return "#6fe3a5";
   return "#9aa0a6";
 }
-
 function verdictProgress(verdict) {
   if (verdict === "안전") return 1.0;
   if (verdict === "주의") return 0.66;
   if (verdict === "위험") return 0.33;
   return 0.5;
 }
-
-function aiLevelFromRate(ratePercent) {
-  if (ratePercent == null) return "중간";
-  if (ratePercent >= 60) return "높음";
-  if (ratePercent >= 30) return "중간";
-  return "낮음";
-}
-
-function aiLevelColor(level) {
-  if (level === "높음") return "#ff3b30";
-  if (level === "중간") return "#ffcc66";
-  if (level === "낮음") return "#6fe3a5";
-  return "#9aa0a6";
+function aiRateColor(ratePercent) {
+  if (ratePercent == null || !Number.isFinite(ratePercent)) return "#9aa0a6";
+  if (ratePercent <= 33) return "#6fe3a5";
+  if (ratePercent <= 66) return "#ffcc66";
+  return "#ff3b30";
 }
 
 function polarToCartesian(cx, cy, r, angleDeg) {
   const rad = ((angleDeg - 90) * Math.PI) / 180;
   return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
 }
-
 function arcPath(cx, cy, r, startAngle, endAngle) {
   const start = polarToCartesian(cx, cy, r, startAngle);
   const end = polarToCartesian(cx, cy, r, endAngle);
@@ -59,30 +56,26 @@ function arcPath(cx, cy, r, startAngle, endAngle) {
 }
 
 async function fetchJson(url, options) {
-  const res = await fetch(url, {
-    ...options,
-    headers: {
-      ...options.headers,
-      "ngrok-skip-browser-warning": "69420", // ✅ ngrok 우회 헤더 추가
-    }
-  });
+  const res = await fetch(url, options);
   const text = await res.text();
   try {
     const json = JSON.parse(text);
     if (!res.ok) throw new Error(json.message || `HTTP ${res.status}`);
     return json;
   } catch {
-    throw new Error(`서버 응답 오류 (HTTP ${res.status})`);
+    throw new Error(`Not JSON response (HTTP ${res.status}). head=${text.slice(0, 120)}`);
   }
 }
-
-// ✅ 유튜브 ID 추출 (단축 URL 등 모든 형식 대응)
 function extractYouTubeId(url) {
   if (!url) return null;
-  const match = url.match(/(?:youtu\.be\/|youtube\.com\/(?:.*v(?:\/|=)|(?:.*\/)?shorts\/|.*embed\/|.*v\/))([\w-]{11})/);
-  return match ? match[1] : null;
+  const m1 = url.match(/[?&]v=([^&]+)/);
+  if (m1?.[1]) return m1[1];
+  const m2 = url.match(/youtu\.be\/([^?&]+)/);
+  if (m2?.[1]) return m2[1];
+  const m3 = url.match(/shorts\/([^?&]+)/);
+  if (m3?.[1]) return m3[1];
+  return null;
 }
-
 function parsePercentString(p) {
   if (p == null) return null;
   if (typeof p === "number") return p;
@@ -90,12 +83,10 @@ function parsePercentString(p) {
   const n = Number(s);
   return Number.isFinite(n) ? n : null;
 }
-
 function normalizeVerdict(v) {
   if (v === "안전" || v === "주의" || v === "위험") return v;
   return "주의";
 }
-
 function summarizeReport(report) {
   if (!report) return "";
   if (typeof report === "string") return report.slice(0, 140);
@@ -105,7 +96,6 @@ function summarizeReport(report) {
     return "";
   }
 }
-
 function isObj(v) {
   return v && typeof v === "object" && !Array.isArray(v);
 }
@@ -118,7 +108,6 @@ function safeText(v) {
     return String(v);
   }
 }
-
 function formatKST(isoLike) {
   try {
     const d = new Date(isoLike);
@@ -133,70 +122,19 @@ function formatKST(isoLike) {
   }
 }
 
-// -------------------- API PIPELINE --------------------
-async function pipelineAnalyze(youtubeUrl) {
-  let info = null;
-  try {
-    info = await fetchJson(`${API_BASE}/api/video/info`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: youtubeUrl }),
-    });
-  } catch (e) {
-    info = { status: "error", message: String(e.message || e), data: null };
-  }
-
-  let detect = null;
-  try {
-    detect = await fetchJson(`${API_BASE}/api/video/detect`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: youtubeUrl }),
-    });
-  } catch (e) {
-    detect = { status: "error", message: String(e.message || e), data: null };
-  }
-
-  let analyze = null;
-  try {
-    analyze = await fetchJson(`${API_BASE}/api/video/analyze`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: youtubeUrl }),
-    });
-  } catch (e) {
-    analyze = { status: "error", message: String(e.message || e), data: null };
-  }
-
-  const infoData = info?.data ?? null;
-  const detectData = detect?.data ?? null;
-  const analyzeData = analyze?.data ?? null;
-
-  const videoId = infoData?.video_id || detectData?.video_id || analyzeData?.video_id || extractYouTubeId(youtubeUrl);
-  const title = infoData?.title || (videoId ? `(${videoId})` : "(unknown)");
-  const thumbnail = infoData?.thumbnail_url || (videoId ? `https://img.youtube.com/vi/${videoId}/hqdefault.jpg` : null);
-  const publishedAt = infoData?.published_at || null;
-  const report = analyzeData?.analysis_result ?? null;
-  const reliabilityLevel = isObj(report) && report?.reliability_level ? normalizeVerdict(report.reliability_level) : null;
-  const aiRate = parsePercentString(detectData?.detection_result?.confidence_score);
-  const aiLevel = aiLevelFromRate(aiRate);
-  const aiProgress = aiRate == null ? 0.5 : Math.max(0, Math.min(1, aiRate / 100));
-  const verdict = reliabilityLevel || "주의";
-  const summary = isObj(report) && report?.summary ? String(report.summary) : report ? summarizeReport(report) : "";
-  const analysisStatus = (info?.status === "success" && detect?.status === "success" && analyze?.status === "success") ? "Done" : "분석 실패";
-
-  return { videoId, title, thumbnail, publishedAt, verdict, summary, analysisStatus, aiRate, aiLevel, aiProgress, report, raw: { info, detect, analyze } };
-}
-
 // -------------------- UI COMPONENTS --------------------
 function FilterButton({ label, active, onPress }) {
   return (
-    <Pressable onPress={onPress} style={[styles.filterBtn, active ? styles.filterBtnActive : styles.filterBtnInactive]}>
-      <Text style={[styles.filterBtnText, active ? styles.filterTextActive : styles.filterTextInactive]}>{label}</Text>
+    <Pressable
+      onPress={onPress}
+      style={[styles.filterBtn, active ? styles.filterBtnActive : styles.filterBtnInactive]}
+    >
+      <Text style={[styles.filterBtnText, active ? styles.filterTextActive : styles.filterTextInactive]}>
+        {label}
+      </Text>
     </Pressable>
   );
 }
-
 function ChipButton({ label, active, onPress }) {
   return (
     <Pressable onPress={onPress} style={[styles.chip, active && styles.chipActive]}>
@@ -212,9 +150,11 @@ function MiniGauge({ label, mainText, color, progress }) {
   const cx = size / 2;
   const cy = size / 2;
   const r = size / 2 - stroke / 2 - pad;
+
   const startA = -120;
   const endA = 120;
   const progEnd = startA + (endA - startA) * progress;
+
   const bgPath = arcPath(cx, cy, r, startA, endA);
   const fgPath = arcPath(cx, cy, r, startA, progEnd);
 
@@ -238,48 +178,64 @@ function MiniGauge({ label, mainText, color, progress }) {
 export default function App() {
   const [screen, setScreen] = useState("list");
   const [selected, setSelected] = useState(null);
+
   const [reports, setReports] = useState([]);
   const [urlInput, setUrlInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [errorText, setErrorText] = useState("");
+
   const [filter, setFilter] = useState("전체");
   const [searchText, setSearchText] = useState("");
   const [dateFilter, setDateFilter] = useState("전체");
   const [expanded, setExpanded] = useState(false);
 
-  // ✅ 딥링크 해석 로직 (공유하기 대응)
-  const parseDeepLink = (fullUrl) => {
-    if (fullUrl.includes("ad-astra://")) {
-      const decoded = decodeURIComponent(fullUrl);
-      const match = decoded.match(/url=([^&]+)/);
-      return match ? match[1] : fullUrl;
-    }
-    return fullUrl;
-  };
-
-  // ✅ 외부 공유 감지 리스너 추가 (중요!)
+  // ✅ [공유 기능 핵심] 외부 URL 감지 로직
   useEffect(() => {
-    Linking.getInitialURL().then((url) => {
-      if (url) onAddUrl(parseDeepLink(url));
+    const handleDeepLink = (event) => {
+      let { url } = event;
+      if (url) processSharedUrl(url);
+    };
+
+    // 초기 실행 시 URL 확인
+    ExpoLinking.getInitialURL().then((url) => {
+      if (url) processSharedUrl(url);
     });
-    const subscription = Linking.addEventListener("url", ({ url }) => {
-      if (url) onAddUrl(parseDeepLink(url));
-    });
+
+    const subscription = ExpoLinking.addEventListener('url', handleDeepLink);
     return () => subscription.remove();
   }, []);
+
+  const processSharedUrl = (url) => {
+    // expo-share-intent 등을 통해 전달된 실제 유튜브 URL 추출
+    // 보통 쿼리 파라미터나 전체 URL 문자열로 들어옵니다.
+    const decodedUrl = decodeURIComponent(url);
+    const youtubeMatch = decodedUrl.match(/https?:\/\/(?:www\.)?(?:youtube\.com|youtu\.be)\/\S+/);
+    if (youtubeMatch) {
+      const targetUrl = youtubeMatch[0];
+      handleAutoAnalyze(targetUrl);
+    }
+  };
+
+  const handleAutoAnalyze = (url) => {
+    // 기존 onAddUrl 로직을 재사용하되 파라미터를 받음
+    onAddUrl(url);
+  };
 
   const filteredReports = useMemo(() => {
     const now = new Date();
     const todayStr = now.toISOString().split("T")[0];
     const oneWeekAgo = new Date();
     oneWeekAgo.setDate(now.getDate() - 7);
+
     return reports
       .filter((item) => {
         const title = (item.title || "").toLowerCase();
         const matchSearch = title.includes(searchText.toLowerCase());
         const matchCategory = filter === "전체" || item.verdict === filter;
+
         const t = item.createdAtISO ? new Date(item.createdAtISO) : new Date(0);
         let matchDate = true;
+
         if (dateFilter === "오늘") {
           const itemDay = t.toISOString().split("T")[0];
           matchDate = itemDay === todayStr;
@@ -296,21 +252,83 @@ export default function App() {
     setExpanded(false);
     setScreen("detail");
   };
-
   const goBack = () => {
     setScreen("list");
     setSelected(null);
     setExpanded(false);
   };
 
-  async function onAddUrl(passedUrl) {
-    let rawUrl = (typeof passedUrl === "string" ? passedUrl : urlInput).trim();
-    
-    // 유튜브 공유 메시지에서 URL만 추출 (제목 등이 섞여있을 때 대비)
-    const urlRegex = /(https?:\/\/[^\s]+)/g;
-    const found = rawUrl.match(urlRegex);
-    let url = found ? found[0] : rawUrl;
+  function patchReport(tempId, patch) {
+    setReports((prev) =>
+      prev.map((x) => (x.id === tempId ? { ...x, ...patch } : x))
+    );
+    setSelected((prevSel) => (prevSel?.id === tempId ? { ...prevSel, ...patch } : prevSel));
+  }
 
+  async function startParallelUpdate(tempId, youtubeUrl) {
+    const body = JSON.stringify({ url: youtubeUrl });
+    const options = { method: "POST", headers: { "Content-Type": "application/json" }, body };
+
+    const pInfo = fetchJson(EP_INFO, options);
+    const pDetect = fetchJson(EP_DETECT, options);
+    const pAnalyze = fetchJson(EP_ANALYZE, options);
+
+    pInfo
+      .then((info) => {
+        const d = info?.data || {};
+        const videoId = d.video_id || extractYouTubeId(youtubeUrl);
+        patchReport(tempId, {
+          video_id: videoId,
+          title: d.title || "제목 없음",
+          thumbnail: d.thumbnail_url || (videoId ? `https://img.youtube.com/vi/${videoId}/hqdefault.jpg` : null),
+          publishedAt: d.published_at || null,
+        });
+        setReports((prev) => prev.map((x) => x.id === tempId ? { ...x, raw: { ...(x.raw || {}), info } } : x));
+        setSelected((prevSel) => prevSel?.id === tempId ? { ...prevSel, raw: { ...(prevSel.raw || {}), info } } : prevSel);
+      })
+      .catch((e) => {
+        setReports((prev) => prev.map((x) => x.id === tempId ? { ...x, raw: { ...(x.raw || {}), info: { status: "error", message: String(e.message || e) } } } : x));
+      });
+
+    pDetect
+      .then((detect) => {
+        const dd = detect?.data || {};
+        const score = dd?.detection_result?.confidence_score;
+        const aiRateRaw = parsePercentString(score);
+        const aiRate = aiRateRaw == null ? null : Math.max(0, Math.min(100, aiRateRaw));
+        const aiProgress = aiRate == null ? 0.0 : aiRate / 100;
+
+        patchReport(tempId, { aiRate, aiProgress });
+        setReports((prev) => prev.map((x) => x.id === tempId ? { ...x, raw: { ...(x.raw || {}), detect } } : x));
+        setSelected((prevSel) => prevSel?.id === tempId ? { ...prevSel, raw: { ...(prevSel.raw || {}), detect } } : prevSel);
+      })
+      .catch((e) => {
+        setReports((prev) => prev.map((x) => x.id === tempId ? { ...x, raw: { ...(x.raw || {}), detect: { status: "error", message: String(e.message || e) } } } : x));
+      });
+
+    pAnalyze
+      .then((analyze) => {
+        const ad = analyze?.data || {};
+        const report = ad?.analysis_result ?? null;
+        const verdict = isObj(report) && report?.reliability_level ? normalizeVerdict(report.reliability_level) : "주의";
+        const summary = isObj(report) && report?.summary ? String(report.summary) : (report ? summarizeReport(report) : "");
+
+        patchReport(tempId, { verdict, summary, report });
+        setReports((prev) => prev.map((x) => x.id === tempId ? { ...x, raw: { ...(x.raw || {}), analyze } } : x));
+        setSelected((prevSel) => prevSel?.id === tempId ? { ...prevSel, raw: { ...(prevSel.raw || {}), analyze } } : prevSel);
+      })
+      .catch((e) => {
+        setReports((prev) => prev.map((x) => x.id === tempId ? { ...x, raw: { ...(x.raw || {}), analyze: { status: "error", message: String(e.message || e) } } } : x));
+      });
+
+    const settled = await Promise.allSettled([pInfo, pDetect, pAnalyze]);
+    const anyRejected = settled.some((s) => s.status === "rejected");
+    patchReport(tempId, { analysisStatus: anyRejected ? "분석 일부 실패" : "Done" });
+  }
+
+  // ✅ 파라미터(sharedUrl)가 있을 경우 이를 우선 사용하도록 보강
+  async function onAddUrl(sharedUrl) {
+    const url = (typeof sharedUrl === 'string' ? sharedUrl : urlInput).trim();
     if (!url) return;
 
     setLoading(true);
@@ -323,72 +341,44 @@ export default function App() {
     const tempItem = {
       id: tempId,
       video_id: tempVideoId || null,
-      title: "기본 정보를 가져오는 중...",
+      title: "분석 중...",
       createdAtISO: nowIso,
       youtubeUrl: url,
       thumbnail: tempVideoId ? `https://img.youtube.com/vi/${tempVideoId}/hqdefault.jpg` : null,
       verdict: "주의",
-      summary: "",
-      analysisStatus: "준비 중",
-      aiLevel: "중간",
-      aiProgress: 0.5,
+      summary: "요약 생성 중...",
+      analysisStatus: "분석중",
+      publishedAt: null,
+      aiRate: null,
+      aiProgress: 0.0,
+      report: null,
+      raw: {},
     };
 
     setReports((prev) => [tempItem, ...prev]);
     setUrlInput("");
 
     try {
-      const infoRes = await fetchJson(`${API_BASE}/api/video/info`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url }),
-      });
-
-      if (infoRes.status === "success") {
-        setReports((prev) =>
-          prev.map((item) =>
-            item.id === tempId
-              ? { ...item, title: infoRes.data.title, thumbnail: infoRes.data.thumbnail_url, summary: "심층 분석 중입니다..." }
-              : item
-          )
-        );
-      }
-
-      const result = await pipelineAnalyze(url);
-      const finalItem = {
-        id: `r-${Date.now()}`,
-        videoId: result.videoId,
-        title: result.title,
-        createdAtISO: nowIso,
-        youtubeUrl: url,
-        thumbnail: result.thumbnail || tempItem.thumbnail,
-        verdict: result.verdict,
-        summary: result.summary,
-        analysisStatus: result.analysisStatus,
-        aiLevel: result.aiLevel,
-        aiRate: result.aiRate,
-        aiProgress: result.aiProgress,
-        report: result.report,
-        raw: result.raw,
-      };
-
-      setReports((prev) => {
-        const withoutTemp = prev.filter((x) => x.id !== tempId);
-        return [finalItem, ...withoutTemp];
-      });
+      await startParallelUpdate(tempId, url);
     } catch (e) {
-      setErrorText("분석 중 오류가 발생했습니다.");
+      patchReport(tempId, {
+        title: "분석 실패",
+        verdict: "위험",
+        summary: String(e.message || e),
+        analysisStatus: "분석 실패",
+      });
+      setErrorText(String(e.message || e));
     } finally {
       setLoading(false);
     }
   }
 
-  // -------------------- UI RENDERING (LIST) --------------------
   if (screen === "list") {
     return (
       <View style={styles.container}>
         <Text style={styles.headerTitle}>AD Astra</Text>
         <Text style={styles.headerSub}>검사 기록</Text>
+
         <View style={styles.urlRow}>
           <TextInput
             value={urlInput}
@@ -403,21 +393,32 @@ export default function App() {
             {loading ? <ActivityIndicator /> : <Text style={styles.urlBtnText}>추가</Text>}
           </Pressable>
         </View>
+
         {!!errorText && <Text style={styles.errorText}>{errorText}</Text>}
+
         <View style={styles.searchRow}>
           <Text style={{ color: "#bdbdbd", marginRight: 8 }}>🔍</Text>
-          <TextInput value={searchText} onChangeText={setSearchText} placeholder="제목 검색" placeholderTextColor="#8a8a8a" style={styles.searchField} />
+          <TextInput
+            value={searchText}
+            onChangeText={setSearchText}
+            placeholder="제목 검색"
+            placeholderTextColor="#8a8a8a"
+            style={styles.searchField}
+          />
         </View>
+
         <View style={styles.dateRow}>
           {["전체", "오늘", "1주일"].map((d) => (
             <ChipButton key={d} label={d} active={dateFilter === d} onPress={() => setDateFilter(d)} />
           ))}
         </View>
+
         <View style={styles.filterRow}>
           {["전체", "위험", "주의", "안전"].map((l) => (
             <FilterButton key={l} label={l} active={filter === l} onPress={() => setFilter(l)} />
           ))}
         </View>
+
         <FlatList
           style={{ width: "100%", marginTop: 14 }}
           contentContainerStyle={{ paddingBottom: 40 }}
@@ -443,28 +444,26 @@ export default function App() {
                   </View>
                   <Text style={styles.meta}>검사: {item.createdAtISO ? formatKST(item.createdAtISO) : "(없음)"}</Text>
                   <Text style={styles.meta}>상태: {item.analysisStatus || "Done"}</Text>
-                  {!!item.summary && <Text style={styles.preview} numberOfLines={2}>{item.summary}</Text>}
+                  {!!item.summary && (
+                    <Text style={styles.preview} numberOfLines={2}>{item.summary}</Text>
+                  )}
                 </View>
               </Pressable>
             );
           }}
-          ListEmptyComponent={
-            <View style={{ marginTop: 30, opacity: 0.85 }}>
-              <Text style={{ color: "#bdbdbd" }}>아직 분석 기록이 없습니다. URL을 추가해보세요.</Text>
-            </View>
-          }
         />
         <StatusBar style="light" />
       </View>
     );
   }
 
-  // -------------------- DETAIL SCREEN --------------------
   const factVerdict = selected?.verdict || "주의";
   const factColor = verdictColor(factVerdict);
-  const aiLevel = selected?.aiLevel || "중간";
-  const aiColor = aiLevelColor(aiLevel);
-  const aiProgress = typeof selected?.aiProgress === "number" ? selected.aiProgress : 0.5;
+  const aiRate = selected?.aiRate;
+  const aiColor = aiRateColor(aiRate);
+  const aiProgress = typeof selected?.aiProgress === "number" ? selected.aiProgress : 0.0;
+  const aiCenterText = aiRate == null ? "--%" : `${Math.round(aiRate)}%`;
+
   const report = selected?.report;
   const issues = isObj(report) && Array.isArray(report.issues) ? report.issues : [];
   const evidence = isObj(report) && Array.isArray(report.evidence) ? report.evidence : [];
@@ -480,14 +479,16 @@ export default function App() {
           <Text style={styles.closeText}>✕</Text>
         </Pressable>
       </View>
+
       <ScrollView style={{ width: "100%" }} contentContainerStyle={{ paddingBottom: 70 }}>
         <View style={styles.bigCard}>
           <Text style={styles.bigCardTitle}>광고 신뢰도</Text>
           <View style={styles.gaugesRow}>
             <MiniGauge label="사실 확인" mainText={factVerdict} color={factColor} progress={verdictProgress(factVerdict)} />
-            <MiniGauge label="AI 생성률" mainText={aiLevel} color={aiColor} progress={aiProgress} />
+            <MiniGauge label="AI 생성률" mainText={aiCenterText} color={aiColor} progress={aiProgress} />
           </View>
         </View>
+
         <View style={styles.bigCard}>
           <View style={styles.detailTopRow}>
             <Text style={styles.detailTitle} numberOfLines={2}>{selected?.title}</Text>
@@ -495,17 +496,32 @@ export default function App() {
               <Text style={styles.playIcon}>▶</Text>
             </Pressable>
           </View>
-          <Text style={styles.metaLine}><Text style={styles.metaLabel}>검사 시각 </Text><Text style={styles.metaValue}>{selected?.createdAtISO ? formatKST(selected.createdAtISO) : "(없음)"}</Text></Text>
-          <Text style={styles.metaLine}><Text style={styles.metaLabel}>영상 제작 </Text><Text style={styles.metaValue}>{selected?.publishedAt ? formatKST(selected.publishedAt) : "(없음)"}</Text></Text>
-          <Text style={styles.metaLine}><Text style={styles.metaLabel}>검사 상태 </Text><Text style={styles.metaValue}>{selected?.analysisStatus || "Done"}</Text></Text>
+
+          <Text style={styles.metaLine}>
+            <Text style={styles.metaLabel}>검사 시각 </Text>
+            <Text style={styles.metaValue}>{selected?.createdAtISO ? formatKST(selected.createdAtISO) : "(없음)"}</Text>
+          </Text>
+          <Text style={styles.metaLine}>
+            <Text style={styles.metaLabel}>영상 제작 </Text>
+            <Text style={styles.metaValue}>{selected?.publishedAt ? formatKST(selected.publishedAt) : "(없음)"}</Text>
+          </Text>
+          <Text style={styles.metaLine}>
+            <Text style={styles.metaLabel}>검사 상태 </Text>
+            <Text style={styles.metaValue}>{selected?.analysisStatus || "Done"}</Text>
+          </Text>
+
           {!!selected?.summary && <Text style={styles.summaryText}>{selected.summary}</Text>}
+
           <Pressable onPress={() => setExpanded(!expanded)} style={styles.expandBtn}>
             <Text style={styles.expandText}>판정 근거 더보기 {expanded ? "▲" : "▼"}</Text>
           </Pressable>
+
           {expanded && (
             <View style={{ marginTop: 14 }}>
               <Text style={styles.sectionHeader}>의심 신호</Text>
-              {issues.length === 0 ? <Text style={styles.sectionBodyMuted}>표시할 의심 신호가 없습니다.</Text> : (
+              {issues.length === 0 ? (
+                <Text style={styles.sectionBodyMuted}>표시할 의심 신호가 없습니다.</Text>
+              ) : (
                 <View style={{ marginTop: 10, gap: 10 }}>
                   {issues.map((it, idx) => (
                     <View key={`iss-${idx}`} style={styles.bulletRow}>
@@ -515,30 +531,33 @@ export default function App() {
                   ))}
                 </View>
               )}
+
               <Text style={[styles.sectionHeader, { marginTop: 22 }]}>근거</Text>
-              {isObj(report?.patent_check) && !!report.patent_check.details && (
-                <View style={[styles.evidenceBox, { marginTop: 10 }]}>
-                  <Text style={styles.evidenceSource}>특허/검증</Text>
-                  <Text style={styles.evidenceFact}>{safeText(report.patent_check.details)}</Text>
-                </View>
-              )}
-              {evidence.length === 0 ? <Text style={[styles.sectionBodyMuted, { marginTop: 10 }]}>표시할 근거가 없습니다.</Text> : (
+              {evidence.length === 0 ? (
+                <Text style={[styles.sectionBodyMuted, { marginTop: 10 }]}>표시할 근거가 없습니다.</Text>
+              ) : (
                 <View style={{ marginTop: 10, gap: 12 }}>
-                  {evidence.map((ev, idx) => (
-                    <View key={`ev-${idx}`} style={styles.evidenceBox}>
-                      {!!ev?.source && <Text style={styles.evidenceSource}>{safeText(ev.source)}</Text>}
-                      {!!ev?.fact && <Text style={styles.evidenceFact}>{safeText(ev.fact)}</Text>}
-                      {!!ev?.url && (
-                        <Pressable onPress={() => Linking.openURL(ev.url)} style={styles.evidenceLinkBtn}>
-                          <Text style={styles.evidenceLinkText}>자료 열기</Text>
-                        </Pressable>
-                      )}
-                    </View>
-                  ))}
+                  {evidence.map((ev, idx) => {
+                    const source = ev?.source;
+                    const fact = ev?.fact;
+                    const url = ev?.url;
+                    return (
+                      <View key={`ev-${idx}`} style={styles.evidenceBox}>
+                        {!!source && <Text style={styles.evidenceSource}>{safeText(source)}</Text>}
+                        {!!fact && <Text style={styles.evidenceFact}>{safeText(fact)}</Text>}
+                        {!!url && (
+                          <Pressable onPress={() => Linking.openURL(url)} style={styles.evidenceLinkBtn}>
+                            <Text style={styles.evidenceLinkText}>자료 열기</Text>
+                          </Pressable>
+                        )}
+                      </View>
+                    );
+                  })}
                 </View>
               )}
             </View>
           )}
+
           <View style={[styles.verdictPill, { borderColor: factColor }]}>
             <Text style={[styles.verdictPillText, { color: factColor }]}>{factVerdict}</Text>
           </View>
@@ -549,9 +568,9 @@ export default function App() {
   );
 }
 
-// -------------------- STYLES (기존과 동일) --------------------
+// -------------------- STYLES (건드리지 않음) --------------------
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#101114", alignItems: "center", justifyContent: "flex-start", paddingTop: 60, paddingHorizontal: 16 },
+  container: { flex: 1, backgroundColor: "#101114", alignItems: "center", paddingTop: 60, paddingHorizontal: 16 },
   headerTitle: { color: "#fff", fontSize: 28, fontWeight: "900" },
   headerSub: { color: "#c6c6c6", marginTop: 4, fontSize: 14 },
   urlRow: { width: "100%", flexDirection: "row", gap: 10, marginTop: 14 },
@@ -608,7 +627,7 @@ const styles = StyleSheet.create({
   bulletRow: { flexDirection: "row", alignItems: "flex-start", gap: 10 },
   bulletDot: { color: "#e8e8e8", fontSize: 18, lineHeight: 22, marginTop: 1 },
   bulletText: { flex: 1, color: "#f0f0f0", fontSize: 16, lineHeight: 24 },
-  evidenceBox: { borderRadius: 16, borderWidth: 1, borderColor: "#414247", backgroundColor: "#242527", padding: 14 },
+  evidenceBox: { borderRadius: 16, borderWidth: 1, borderColor: "#414247", backgroundColor: "#242527", padding: 14, marginBottom: 12 }, // marginBottom 약간 추가
   evidenceSource: { color: "#fff", fontSize: 14, fontWeight: "900" },
   evidenceFact: { marginTop: 8, color: "#efefef", fontSize: 15, lineHeight: 22 },
   evidenceLinkBtn: { marginTop: 12, alignSelf: "flex-start", paddingVertical: 8, paddingHorizontal: 12, borderRadius: 12, borderWidth: 1, borderColor: "#4a4b52", backgroundColor: "#1a1b20" },
