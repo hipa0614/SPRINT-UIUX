@@ -18,7 +18,7 @@ import { useShareIntent } from "expo-share-intent";
 /**
  * ✅ 백엔드(팀 app.py) 기준
  * POST /api/video/info    { url }
- * POST /api/video/detect  { url }
+ * POST /api/video/detect  { url }   -> avg_fake_score, avg_real_score (0~1)
  * POST /api/video/analyze { url }
  */
 const API_ROOT = "https://uncloistral-pseudoheroical-milena.ngrok-free.dev";
@@ -37,29 +37,7 @@ function verdictProgress(verdict) {
   if (verdict === "안전") return 1.0;
   if (verdict === "주의") return 0.66;
   if (verdict === "위험") return 0.33;
-  return 0.5;
-}
-function aiRateColor(ratePercent) {
-  if (ratePercent == null || !Number.isFinite(ratePercent)) return "#9aa0a6";
-  if (ratePercent <= 33) return "#6fe3a5";
-  if (ratePercent <= 66) return "#ffcc66";
-  return "#ff3b30";
-}
-
-// ✅ 리스트 배지용(상태)
-function statusColor(status) {
-  if (status === "분석중") return "#9aa0a6";
-  if (status === "분석 실패") return "#ff3b30";
-  if (status === "분석 일부 실패") return "#ffcc66";
-  return "#9aa0a6";
-}
-function statusLabel(status) {
-  if (!status) return "";
-  if (status === "Done") return "완료";
-  return status;
-}
-function isAnalyzing(status) {
-  return status === "분석중";
+  return 0.0;
 }
 
 function polarToCartesian(cx, cy, r, angleDeg) {
@@ -97,14 +75,6 @@ function extractYouTubeId(url) {
   return null;
 }
 
-function parsePercentString(p) {
-  if (p == null) return null;
-  if (typeof p === "number") return p;
-  const s = String(p).trim().replace("%", "");
-  const n = Number(s);
-  return Number.isFinite(n) ? n : null;
-}
-
 function normalizeVerdict(v) {
   if (v === "안전" || v === "주의" || v === "위험") return v;
   return "주의";
@@ -112,9 +82,9 @@ function normalizeVerdict(v) {
 
 function summarizeReport(report) {
   if (!report) return "";
-  if (typeof report === "string") return report.slice(0, 140);
+  if (typeof report === "string") return report.slice(0, 180);
   try {
-    return JSON.stringify(report).slice(0, 140);
+    return JSON.stringify(report).slice(0, 180);
   } catch {
     return "";
   }
@@ -165,6 +135,15 @@ function pickYouTubeUrlFromAnyText(incoming) {
   return null;
 }
 
+function clamp01(x) {
+  if (x == null || !Number.isFinite(x)) return 0;
+  return Math.max(0, Math.min(1, x));
+}
+function scoreToPercent01(x) {
+  const v = clamp01(x);
+  return Math.round(v * 100);
+}
+
 // -------------------- UI COMPONENTS --------------------
 function FilterButton({ label, active, onPress }) {
   return (
@@ -206,7 +185,7 @@ function MiniGauge({ label, mainText, color, progress }) {
     <View style={styles.gaugeCell}>
       <View style={{ width: size, height: size }}>
         <Svg width="100%" height="100%" viewBox={`0 0 ${size} ${size}`}>
-          <Path d={bgPath} stroke="rgba(255,255,255,0.30)" strokeWidth={stroke} strokeLinecap="round" fill="none" />
+          <Path d={bgPath} stroke="rgba(255,255,255,0.20)" strokeWidth={stroke} strokeLinecap="round" fill="none" />
           <Path d={fgPath} stroke={color} strokeWidth={stroke} strokeLinecap="round" fill="none" />
         </Svg>
         <View style={styles.gaugeCenterAbs}>
@@ -214,6 +193,53 @@ function MiniGauge({ label, mainText, color, progress }) {
         </View>
       </View>
       <Text style={styles.gaugeLabel}>{label}</Text>
+    </View>
+  );
+}
+
+/**
+ * ✅ AI 생성률: Fake / Real 두 개 점수를 세로 바(막대)로 표시 (색 최소화/무채색)
+ * - fakeScore, realScore: 0~1
+ */
+function DualBar({ label = "AI 생성률", fakeScore, realScore }) {
+  const fakeP = clamp01(fakeScore);
+  const realP = clamp01(realScore);
+  const fakePct = scoreToPercent01(fakeScore);
+  const realPct = scoreToPercent01(realScore);
+
+  return (
+    <View style={styles.gaugeCell}>
+      <View style={styles.dualBarWrap}>
+        <View style={styles.dualBarRow}>
+          <View style={styles.barCol}>
+            <View style={styles.barTrack}>
+              <View style={[styles.barFill, { height: `${Math.round(fakeP * 100)}%` }]} />
+            </View>
+            <Text style={styles.barValue}>{fakePct}%</Text>
+            <Text style={styles.barLabel}>Fake</Text>
+          </View>
+
+          <View style={styles.barCol}>
+            <View style={styles.barTrack}>
+              <View style={[styles.barFill, { height: `${Math.round(realP * 100)}%` }]} />
+            </View>
+            <Text style={styles.barValue}>{realPct}%</Text>
+            <Text style={styles.barLabel}>Real</Text>
+          </View>
+        </View>
+      </View>
+
+      {/* ✅ MiniGauge랑 같은 위치에 라벨 */}
+      <Text style={styles.gaugeLabel}>{label}</Text>
+    </View>
+  );
+}
+
+
+function StatusPill({ text }) {
+  return (
+    <View style={styles.statusPill}>
+      <Text style={styles.statusPillText}>{text}</Text>
     </View>
   );
 }
@@ -251,11 +277,6 @@ export default function App() {
     setExpanded(false);
   };
 
-  /**
-   * ✅ 더 정교한 patch
-   * - patch가 객체면 merge
-   * - patch가 함수면 (prevItem) => delta 형태로 계산 후 merge
-   */
   const patchReport = useCallback((tempId, patch) => {
     setReports((prev) =>
       prev.map((x) => {
@@ -272,9 +293,6 @@ export default function App() {
     });
   }, []);
 
-  /**
-   * ✅ raw merge를 한 곳으로 통일
-   */
   const mergeRaw = useCallback(
     (tempId, key, payload) => {
       patchReport(tempId, (prevItem) => ({
@@ -316,6 +334,10 @@ export default function App() {
     if (shareError) setErrorText(String(shareError));
   }, [shareError]);
 
+  function isAnalyzing(item) {
+    return item?.analysisStatus === "분석중";
+  }
+
   // ✅ 병렬 요청 + 먼저 오는 것부터 UI 업데이트
   async function startParallelUpdate(tempId, youtubeUrl) {
     const body = JSON.stringify({ url: youtubeUrl });
@@ -325,6 +347,7 @@ export default function App() {
     const pDetect = fetchJson(EP_DETECT, options);
     const pAnalyze = fetchJson(EP_ANALYZE, options);
 
+    // 1) INFO
     pInfo
       .then((info) => {
         const d = info?.data || {};
@@ -343,21 +366,30 @@ export default function App() {
         mergeRaw(tempId, "info", { status: "error", message: String(e.message || e) });
       });
 
+    // 2) DETECT  (avg_fake_score / avg_real_score)
     pDetect
       .then((detect) => {
         const dd = detect?.data || {};
-        const score = dd?.detection_result?.confidence_score;
-        const aiRateRaw = parsePercentString(score);
-        const aiRate = aiRateRaw == null ? null : Math.max(0, Math.min(100, aiRateRaw));
-        const aiProgress = aiRate == null ? 0.0 : aiRate / 100;
+        const dr = dd?.detection_result || {};
 
-        patchReport(tempId, { aiRate, aiProgress });
+        const fakeScore = Number(dr?.avg_fake_score);
+        const realScore = Number(dr?.avg_real_score);
+
+        patchReport(tempId, {
+          fakeScore: Number.isFinite(fakeScore) ? clamp01(fakeScore) : null,
+          realScore: Number.isFinite(realScore) ? clamp01(realScore) : null,
+          fakeFrameCount: dr?.fake_frame_count ?? null,
+          realFrameCount: dr?.real_frame_count ?? null,
+          totalAnalyzedFrames: dr?.total_analyzed_frames ?? null,
+        });
+
         mergeRaw(tempId, "detect", detect);
       })
       .catch((e) => {
         mergeRaw(tempId, "detect", { status: "error", message: String(e.message || e) });
       });
 
+    // 3) ANALYZE
     pAnalyze
       .then((analyze) => {
         const ad = analyze?.data || {};
@@ -367,7 +399,11 @@ export default function App() {
           isObj(report) && report?.reliability_level ? normalizeVerdict(report.reliability_level) : "주의";
 
         const summary =
-          isObj(report) && report?.summary ? String(report.summary) : report ? summarizeReport(report) : "";
+          isObj(report) && report?.summary
+            ? String(report.summary)
+            : report
+            ? summarizeReport(report)
+            : "";
 
         patchReport(tempId, { verdict, summary, report });
         mergeRaw(tempId, "analyze", analyze);
@@ -376,6 +412,7 @@ export default function App() {
         mergeRaw(tempId, "analyze", { status: "error", message: String(e.message || e) });
       });
 
+    // ✅ 최종 완료 상태는 셋 다 끝났을 때
     const settled = await Promise.allSettled([pInfo, pDetect, pAnalyze]);
     const anyRejected = settled.some((s) => s.status === "rejected");
     patchReport(tempId, { analysisStatus: anyRejected ? "분석 일부 실패" : "Done" });
@@ -401,16 +438,21 @@ export default function App() {
       youtubeUrl: url,
       thumbnail: tempVideoId ? `https://img.youtube.com/vi/${tempVideoId}/hqdefault.jpg` : null,
 
-      // ✅ 핵심: 분석중에는 verdict 자체를 "분석중"으로 넣어서 "주의"가 뜨는 맥락 이상함 제거
-      verdict: "분석중",
+      // ✅ 분석중일 때 "주의" 같은 기본 판정이 뜨지 않게
+      verdict: null,
       summary: "",
+
       analysisStatus: "분석중",
-
       publishedAt: null,
-      aiRate: null,
-      aiProgress: 0.0,
-      report: null,
 
+      // ✅ detect 결과(0~1)
+      fakeScore: null,
+      realScore: null,
+      fakeFrameCount: null,
+      realFrameCount: null,
+      totalAnalyzedFrames: null,
+
+      report: null,
       raw: {},
     };
 
@@ -442,10 +484,11 @@ export default function App() {
       .filter((item) => {
         const title = (item.title || "").toLowerCase();
         const matchSearch = title.includes(searchText.toLowerCase());
-
-        // ✅ 필터: 분석중은 "전체"일 때만 보이게(위험/주의/안전에선 안 섞이게)
         const matchCategory =
-          filter === "전체" ? true : item.verdict === filter;
+          filter === "전체" ||
+          (filter === "위험" && item.verdict === "위험") ||
+          (filter === "주의" && item.verdict === "주의") ||
+          (filter === "안전" && item.verdict === "안전");
 
         const t = item.createdAtISO ? new Date(item.createdAtISO) : new Date(0);
         let matchDate = true;
@@ -514,17 +557,8 @@ export default function App() {
           data={filteredReports}
           keyExtractor={(item) => item.id}
           renderItem={({ item }) => {
-            const st = item.analysisStatus || "Done";
-            const stText = statusLabel(st);
-            const stColor = statusColor(st);
-            const showStatusBadge = st !== "Done";
-
-            // ✅ verdict 표시 규칙:
-            // - 분석중이면 verdict 대신 "분석중"(회색)
-            // - 완료/실패 등은 verdict 그대로
-            const isNowAnalyzing = isAnalyzing(st);
-            const verdictText = isNowAnalyzing ? "분석중" : item.verdict;
-            const vColor = isNowAnalyzing ? "#9aa0a6" : verdictColor(item.verdict);
+            const analyzing = isAnalyzing(item);
+            const color = verdictColor(item.verdict);
 
             return (
               <Pressable style={styles.listCard} onPress={() => openDetail(item)}>
@@ -542,19 +576,22 @@ export default function App() {
                       {item.title}
                     </Text>
 
-                    <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
-                      
-
-                      <View style={[styles.badgeBig, { borderColor: vColor }]}>
-                        <Text style={[styles.badgeBigText, { color: vColor }]}>{verdictText}</Text>
+                    {/* ✅ 분석중이면 "주의" 대신 회색 상태 배지 */}
+                    {analyzing ? (
+                      <StatusPill text="분석중" />
+                    ) : item.verdict ? (
+                      <View style={[styles.badgeBig, { borderColor: color }]}>
+                        <Text style={[styles.badgeBigText, { color }]}>{item.verdict}</Text>
                       </View>
-                    </View>
+                    ) : (
+                      <StatusPill text={item.analysisStatus || "상태"} />
+                    )}
                   </View>
 
                   <Text style={styles.meta}>검사: {item.createdAtISO ? formatKST(item.createdAtISO) : "(없음)"}</Text>
 
-                  {/* ✅ 분석중일 땐 요약 숨김 */}
-                  {!!item.summary && !isNowAnalyzing && (
+                  {/* ✅ "요약 생성 중..." 같은 플레이스홀더 제거: summary 있을 때만 표시 */}
+                  {!!item.summary && !analyzing && (
                     <Text style={styles.preview} numberOfLines={2}>
                       {item.summary}
                     </Text>
@@ -571,17 +608,10 @@ export default function App() {
   }
 
   // -------------------- DETAIL --------------------
-  // ✅ 디테일에서도 분석중이면 사실확인 게이지에 "분석중"을 띄우고 회색으로 처리
-  const selectedStatus = selected?.analysisStatus || "Done";
-  const analyzingNow = isAnalyzing(selectedStatus);
-
-  const factVerdict = analyzingNow ? "분석중" : selected?.verdict || "주의";
-  const factColor = analyzingNow ? "#9aa0a6" : verdictColor(factVerdict);
-
-  const aiRate = selected?.aiRate;
-  const aiColor = aiRateColor(aiRate);
-  const aiProgress = typeof selected?.aiProgress === "number" ? selected.aiProgress : 0.0;
-  const aiCenterText = aiRate == null ? "--%" : `${Math.round(aiRate)}%`;
+  const analyzing = isAnalyzing(selected);
+  const factVerdict = analyzing ? "분석중" : selected?.verdict || "주의";
+  const factColor = analyzing ? "#9aa0a6" : verdictColor(factVerdict);
+  const factProgress = analyzing ? 0.0 : verdictProgress(factVerdict);
 
   const report = selected?.report;
   const issues = isObj(report) && Array.isArray(report.issues) ? report.issues : [];
@@ -605,8 +635,18 @@ export default function App() {
           <Text style={styles.bigCardTitle}>광고 신뢰도</Text>
 
           <View style={styles.gaugesRow}>
-            <MiniGauge label="사실 확인" mainText={factVerdict} color={factColor} progress={analyzingNow ? 0.5 : verdictProgress(factVerdict)} />
-            <MiniGauge label="AI 생성률" mainText={aiCenterText} color={aiColor} progress={aiProgress} />
+            <MiniGauge
+              label="사실 확인"
+              mainText={factVerdict}
+              color={factColor}
+              progress={factProgress}
+            />
+
+            <DualBar
+              label="AI 생성률"
+              fakeScore={selected?.fakeScore ?? 0}
+              realScore={selected?.realScore ?? 0}
+            />
           </View>
         </View>
 
@@ -631,10 +671,10 @@ export default function App() {
           </Text>
           <Text style={styles.metaLine}>
             <Text style={styles.metaLabel}>검사 상태 </Text>
-            <Text style={styles.metaValue}>{selectedStatus}</Text>
+            <Text style={styles.metaValue}>{selected?.analysisStatus || "Done"}</Text>
           </Text>
 
-          {!!selected?.summary && <Text style={styles.summaryText}>{selected.summary}</Text>}
+          {!!selected?.summary && !analyzing && <Text style={styles.summaryText}>{selected.summary}</Text>}
 
           <Pressable onPress={() => setExpanded(!expanded)} style={styles.expandBtn}>
             <Text style={styles.expandText}>판정 근거 더보기 {expanded ? "▲" : "▼"}</Text>
@@ -682,9 +722,16 @@ export default function App() {
             </View>
           )}
 
-          <View style={[styles.verdictPill, { borderColor: factColor }]}>
-            <Text style={[styles.verdictPillText, { color: factColor }]}>{factVerdict}</Text>
-          </View>
+          {/* 하단 pill: 분석중이면 회색으로 "분석중", 완료면 verdict */}
+          {analyzing ? (
+            <View style={[styles.verdictPill, { borderColor: "#9aa0a6" }]}>
+              <Text style={[styles.verdictPillText, { color: "#9aa0a6" }]}>분석중</Text>
+            </View>
+          ) : (
+            <View style={[styles.verdictPill, { borderColor: factColor }]}>
+              <Text style={[styles.verdictPillText, { color: factColor }]}>{selected?.verdict || "주의"}</Text>
+            </View>
+          )}
         </View>
       </ScrollView>
 
@@ -769,17 +816,15 @@ const styles = StyleSheet.create({
   badgeBig: { paddingVertical: 6, paddingHorizontal: 12, borderRadius: 999, borderWidth: 2 },
   badgeBigText: { fontSize: 16, fontWeight: "900" },
 
-  badgeSmall: {
+  statusPill: {
     paddingVertical: 6,
-    paddingHorizontal: 10,
+    paddingHorizontal: 12,
     borderRadius: 999,
     borderWidth: 2,
+    borderColor: "#70757a",
     backgroundColor: "rgba(255,255,255,0.06)",
   },
-  badgeSmallText: {
-    fontSize: 13,
-    fontWeight: "900",
-  },
+  statusPillText: { fontSize: 16, fontWeight: "900", color: "#cfcfcf" },
 
   modalContainer: { flex: 1, backgroundColor: "#101114", paddingTop: 44 },
   modalTopBar: {
@@ -811,6 +856,34 @@ const styles = StyleSheet.create({
   gaugeCenterAbs: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, alignItems: "center", justifyContent: "center" },
   gaugeMainText: { fontSize: 44, fontWeight: "900", letterSpacing: 1 },
   gaugeLabel: { marginTop: 10, color: "#ffffff", fontSize: 16, fontWeight: "900" },
+
+  // DualBar
+  dualBarWrap: {
+    width: 190,
+    minHeight: 190,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  dualBarRow: { marginTop: 12, flexDirection: "row", gap: 18, alignItems: "flex-end" },
+  barCol: { alignItems: "center", width: 70 },
+  barTrack: {
+    width: 34,
+    height: 120,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#51525b",
+    backgroundColor: "rgba(255,255,255,0.06)",
+    overflow: "hidden",
+    justifyContent: "flex-end",
+  },
+  barFill: {
+    width: "100%",
+    backgroundColor: "rgba(255,255,255,0.55)", // 무채색
+  },
+  barValue: { marginTop: 8, color: "#f0f0f0", fontSize: 14, fontWeight: "900" },
+  barLabel: { marginTop: 4, color: "#cfcfcf", fontSize: 12, fontWeight: "900" },
+
 
   detailTopRow: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 14 },
   detailTitle: { flex: 1, color: "#fff", fontSize: 22, fontWeight: "900", lineHeight: 28 },
