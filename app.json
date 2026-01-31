@@ -3,7 +3,9 @@
     "name": "sprint-week1",
     "slug": "sprint-week1",
     "scheme": "sprintweek1",
-    "plugins": ["expo-share-intent"],
+    "plugins": [
+      ["expo-share-intent", {"ios":false}]
+    ],
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -27,28 +29,63 @@
       "intentFilters": [
         {
           "action": "SEND",
-          "category": ["DEFAULT"],
-          "data": [{ "mimeType": "text/plain" }]
+          "category": [
+            "DEFAULT"
+          ],
+          "data": [
+            {
+              "mimeType": "text/plain"
+            }
+          ]
         },
         {
           "action": "SEND",
-          "category": ["DEFAULT"],
-          "data": [{ "mimeType": "text/*" }]
+          "category": [
+            "DEFAULT"
+          ],
+          "data": [
+            {
+              "mimeType": "text/*"
+            }
+          ]
         },
         {
           "action": "SEND_MULTIPLE",
-          "category": ["DEFAULT"],
-          "data": [{ "mimeType": "text/plain" }]
+          "category": [
+            "DEFAULT"
+          ],
+          "data": [
+            {
+              "mimeType": "text/plain"
+            }
+          ]
         },
         {
           "action": "SEND_MULTIPLE",
-          "category": ["DEFAULT"],
-          "data": [{ "mimeType": "text/*" }]
+          "category": [
+            "DEFAULT"
+          ],
+          "data": [
+            {
+              "mimeType": "text/*"
+            }
+          ]
         }
       ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "extra": {
+      "eas": {
+        "build": {
+          "experimental": {
+            
+          }
+        },
+        "projectId": "e921b52a-4415-4a51-ab85-6bacdd7bfd32"
+      }
+    },
+    "owner": "hipa0614"
   }
 }

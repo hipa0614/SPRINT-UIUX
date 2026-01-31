@@ -120,7 +120,6 @@ function formatKST(isoLike) {
 
 /**
  * ✅ 공유로 들어온 문자열에서 "진짜 유튜브 URL" 최대한 견고하게 추출
- * - 유튜브 앱 공유는 보통 TEXT로 옴: "제목\nhttps://youtu.be/...."
  */
 function pickYouTubeUrlFromAnyText(incoming) {
   if (!incoming) return null;
@@ -197,10 +196,6 @@ function MiniGauge({ label, mainText, color, progress }) {
   );
 }
 
-/**
- * ✅ AI 생성률: Fake / Real 두 개 점수를 세로 바(막대)로 표시 (색 최소화/무채색)
- * - fakeScore, realScore: 0~1
- */
 function DualBar({ label = "AI 생성률", fakeScore, realScore }) {
   const fakeP = clamp01(fakeScore);
   const realP = clamp01(realScore);
@@ -229,12 +224,10 @@ function DualBar({ label = "AI 생성률", fakeScore, realScore }) {
         </View>
       </View>
 
-      {/* ✅ MiniGauge랑 같은 위치에 라벨 */}
       <Text style={styles.gaugeLabel}>{label}</Text>
     </View>
   );
 }
-
 
 function StatusPill({ text }) {
   return (
@@ -257,17 +250,18 @@ export default function App() {
   const [filter, setFilter] = useState("전체");
   const [searchText, setSearchText] = useState("");
   const [dateFilter, setDateFilter] = useState("전체");
+
+  // ✅ "정보 더보기" 토글
   const [expanded, setExpanded] = useState(false);
 
-  // ✅ 공유 이벤트 중복 방지(같은 공유가 2번 들어오는 폰/환경 있음)
+  // ✅ 공유 이벤트 중복 방지
   const lastShareRef = useRef({ key: "", ts: 0 });
 
-  // ✅ expo-share-intent 훅 (공유로 들어온 텍스트/URL 받기)
   const { hasShareIntent, shareIntent, resetShareIntent, error: shareError } = useShareIntent();
 
   const openDetail = (item) => {
     setSelected(item);
-    setExpanded(false);
+    setExpanded(false); // 상세 들어갈 때 정보는 접힌 상태
     setScreen("detail");
   };
 
@@ -302,9 +296,6 @@ export default function App() {
     [patchReport]
   );
 
-  /**
-   * ✅ 공유로 들어온 유튜브 링크를 "입력칸에 자동으로 넣기"
-   */
   useEffect(() => {
     if (!hasShareIntent) return;
 
@@ -338,7 +329,6 @@ export default function App() {
     return item?.analysisStatus === "분석중";
   }
 
-  // ✅ 병렬 요청 + 먼저 오는 것부터 UI 업데이트
   async function startParallelUpdate(tempId, youtubeUrl) {
     const body = JSON.stringify({ url: youtubeUrl });
     const options = { method: "POST", headers: { "Content-Type": "application/json" }, body };
@@ -347,7 +337,6 @@ export default function App() {
     const pDetect = fetchJson(EP_DETECT, options);
     const pAnalyze = fetchJson(EP_ANALYZE, options);
 
-    // 1) INFO
     pInfo
       .then((info) => {
         const d = info?.data || {};
@@ -366,7 +355,6 @@ export default function App() {
         mergeRaw(tempId, "info", { status: "error", message: String(e.message || e) });
       });
 
-    // 2) DETECT  (avg_fake_score / avg_real_score)
     pDetect
       .then((detect) => {
         const dd = detect?.data || {};
@@ -389,7 +377,6 @@ export default function App() {
         mergeRaw(tempId, "detect", { status: "error", message: String(e.message || e) });
       });
 
-    // 3) ANALYZE
     pAnalyze
       .then((analyze) => {
         const ad = analyze?.data || {};
@@ -412,13 +399,11 @@ export default function App() {
         mergeRaw(tempId, "analyze", { status: "error", message: String(e.message || e) });
       });
 
-    // ✅ 최종 완료 상태는 셋 다 끝났을 때
     const settled = await Promise.allSettled([pInfo, pDetect, pAnalyze]);
     const anyRejected = settled.some((s) => s.status === "rejected");
     patchReport(tempId, { analysisStatus: anyRejected ? "분석 일부 실패" : "Done" });
   }
 
-  // ✅ 입력/공유 둘 다 지원
   async function onAddUrl(sharedUrl) {
     const url = (typeof sharedUrl === "string" ? sharedUrl : urlInput).trim();
     if (!url) return;
@@ -438,14 +423,12 @@ export default function App() {
       youtubeUrl: url,
       thumbnail: tempVideoId ? `https://img.youtube.com/vi/${tempVideoId}/hqdefault.jpg` : null,
 
-      // ✅ 분석중일 때 "주의" 같은 기본 판정이 뜨지 않게
       verdict: null,
       summary: "",
 
       analysisStatus: "분석중",
       publishedAt: null,
 
-      // ✅ detect 결과(0~1)
       fakeScore: null,
       realScore: null,
       fakeFrameCount: null,
@@ -576,7 +559,6 @@ export default function App() {
                       {item.title}
                     </Text>
 
-                    {/* ✅ 분석중이면 "주의" 대신 회색 상태 배지 */}
                     {analyzing ? (
                       <StatusPill text="분석중" />
                     ) : item.verdict ? (
@@ -590,7 +572,6 @@ export default function App() {
 
                   <Text style={styles.meta}>검사: {item.createdAtISO ? formatKST(item.createdAtISO) : "(없음)"}</Text>
 
-                  {/* ✅ "요약 생성 중..." 같은 플레이스홀더 제거: summary 있을 때만 표시 */}
                   {!!item.summary && !analyzing && (
                     <Text style={styles.preview} numberOfLines={2}>
                       {item.summary}
@@ -631,60 +612,33 @@ export default function App() {
       </View>
 
       <ScrollView style={{ width: "100%" }} contentContainerStyle={{ paddingBottom: 70 }}>
+        {/* 1) 신뢰도 카드 */}
         <View style={styles.bigCard}>
           <Text style={styles.bigCardTitle}>광고 신뢰도</Text>
 
           <View style={styles.gaugesRow}>
-            <MiniGauge
-              label="사실 확인"
-              mainText={factVerdict}
-              color={factColor}
-              progress={factProgress}
-            />
-
-            <DualBar
-              label="AI 생성률"
-              fakeScore={selected?.fakeScore ?? 0}
-              realScore={selected?.realScore ?? 0}
-            />
+            <MiniGauge label="사실 확인" mainText={factVerdict} color={factColor} progress={factProgress} />
+            <DualBar label="AI 생성률" fakeScore={selected?.fakeScore ?? 0} realScore={selected?.realScore ?? 0} />
           </View>
         </View>
 
+        {/* 2) 상세 분석 결과 + (안쪽) 영상 정보 더보기 */}
         <View style={styles.bigCard}>
-          <View style={styles.detailTopRow}>
-            <Text style={styles.detailTitle} numberOfLines={2}>
-              {selected?.title}
-            </Text>
+          <Text style={styles.bigCardTitle}>상세 분석 결과</Text>
 
-            <Pressable onPress={() => selected?.youtubeUrl && Linking.openURL(selected.youtubeUrl)} style={styles.playBtn}>
-              <Text style={styles.playIcon}>▶</Text>
-            </Pressable>
-          </View>
+          {!!selected?.summary && !analyzing && (
+            <View style={{ marginTop: 12 }}>
+              <Text style={styles.sectionHeader}>요약</Text>
+              <Text style={styles.summaryText}>{selected.summary}</Text>
+            </View>
+          )}
 
-          <Text style={styles.metaLine}>
-            <Text style={styles.metaLabel}>검사 시각 </Text>
-            <Text style={styles.metaValue}>{selected?.createdAtISO ? formatKST(selected.createdAtISO) : "(없음)"}</Text>
-          </Text>
-          <Text style={styles.metaLine}>
-            <Text style={styles.metaLabel}>영상 제작 </Text>
-            <Text style={styles.metaValue}>{selected?.publishedAt ? formatKST(selected.publishedAt) : "(없음)"}</Text>
-          </Text>
-          <Text style={styles.metaLine}>
-            <Text style={styles.metaLabel}>검사 상태 </Text>
-            <Text style={styles.metaValue}>{selected?.analysisStatus || "Done"}</Text>
-          </Text>
-
-          {!!selected?.summary && !analyzing && <Text style={styles.summaryText}>{selected.summary}</Text>}
-
-          <Pressable onPress={() => setExpanded(!expanded)} style={styles.expandBtn}>
-            <Text style={styles.expandText}>판정 근거 더보기 {expanded ? "▲" : "▼"}</Text>
-          </Pressable>
-
-          {expanded && (
+          {(analyzing || issues.length > 0) && (
             <View style={{ marginTop: 14 }}>
               <Text style={styles.sectionHeader}>의심 신호</Text>
-              {issues.length === 0 ? (
-                <Text style={styles.sectionBodyMuted}>표시할 의심 신호가 없습니다.</Text>
+
+              {analyzing && issues.length === 0 ? (
+                <Text style={styles.sectionBodyMuted}>분석 중입니다. 잠시 후 의심 신호가 표시됩니다.</Text>
               ) : (
                 <View style={{ marginTop: 10, gap: 10 }}>
                   {issues.map((it, idx) => (
@@ -695,43 +649,82 @@ export default function App() {
                   ))}
                 </View>
               )}
-
-              <Text style={[styles.sectionHeader, { marginTop: 22 }]}>근거</Text>
-              {evidence.length === 0 ? (
-                <Text style={[styles.sectionBodyMuted, { marginTop: 10 }]}>표시할 근거가 없습니다.</Text>
-              ) : (
-                <View style={{ marginTop: 10, gap: 12 }}>
-                  {evidence.map((ev, idx) => {
-                    const source = ev?.source;
-                    const fact = ev?.fact;
-                    const url = ev?.url;
-                    return (
-                      <View key={`ev-${idx}`} style={styles.evidenceBox}>
-                        {!!source && <Text style={styles.evidenceSource}>{safeText(source)}</Text>}
-                        {!!fact && <Text style={styles.evidenceFact}>{safeText(fact)}</Text>}
-                        {!!url && (
-                          <Pressable onPress={() => Linking.openURL(url)} style={styles.evidenceLinkBtn}>
-                            <Text style={styles.evidenceLinkText}>자료 열기</Text>
-                          </Pressable>
-                        )}
-                      </View>
-                    );
-                  })}
-                </View>
-              )}
             </View>
           )}
 
-          {/* 하단 pill: 분석중이면 회색으로 "분석중", 완료면 verdict */}
-          {analyzing ? (
-            <View style={[styles.verdictPill, { borderColor: "#9aa0a6" }]}>
-              <Text style={[styles.verdictPillText, { color: "#9aa0a6" }]}>분석중</Text>
+
+          <View style={{ marginTop: 20 }}>
+            <Text style={styles.sectionHeader}>근거</Text>
+            {evidence.length === 0 ? (
+              <Text style={[styles.sectionBodyMuted, { marginTop: 10 }]}>
+                {analyzing ? "분석 중입니다. 잠시 후 근거가 표시됩니다." : "표시할 근거가 없습니다."}
+              </Text>
+            ) : (
+              <View style={{ marginTop: 10, gap: 12 }}>
+                {evidence.map((ev, idx) => {
+                  const source = ev?.source;
+                  const fact = ev?.fact;
+                  const url = ev?.url;
+                  return (
+                    <View key={`ev-${idx}`} style={styles.evidenceBox}>
+                      {!!source && <Text style={styles.evidenceSource}>{safeText(source)}</Text>}
+                      {!!fact && <Text style={styles.evidenceFact}>{safeText(fact)}</Text>}
+                      {!!url && (
+                        <Pressable onPress={() => Linking.openURL(url)} style={styles.evidenceLinkBtn}>
+                          <Text style={styles.evidenceLinkText}>자료 열기</Text>
+                        </Pressable>
+                      )}
+                    </View>
+                  );
+                })}
+              </View>
+            )}
+          </View>
+
+          {/* ✅ 영상 정보 박스 (근거 박스 톤 + 정보 더보기) */}
+          <View style={styles.innerDivider} />
+
+          <View style={styles.videoInfoBox}>
+            <View style={styles.videoInfoHeaderRow}>
+              <Text style={styles.videoInfoTitle}>영상 정보</Text>
+
+              <Pressable onPress={() => setExpanded(!expanded)} style={styles.metaToggleBtn}>
+                <Text style={styles.metaToggleText}>{expanded ? "접기 ▲" : "정보 더보기 ▼"}</Text>
+              </Pressable>
             </View>
-          ) : (
-            <View style={[styles.verdictPill, { borderColor: factColor }]}>
-              <Text style={[styles.verdictPillText, { color: factColor }]}>{selected?.verdict || "주의"}</Text>
-            </View>
-          )}
+
+            {expanded && (
+              <View style={{ marginTop: 10 }}>
+                <Text style={styles.metaTitle} numberOfLines={3}>
+                  {selected?.title}
+                </Text>
+
+                {!!selected?.youtubeUrl && (
+                  <Pressable onPress={() => Linking.openURL(selected.youtubeUrl)} style={styles.playInlineBtn}>
+                    <Text style={styles.playInlineText}>▶ 영상 열기</Text>
+                  </Pressable>
+                )}
+
+                <Text style={styles.metaLine}>
+                  <Text style={styles.metaLabel}>검사 시각 </Text>
+                  <Text style={styles.metaValue}>
+                    {selected?.createdAtISO ? formatKST(selected.createdAtISO) : "(없음)"}
+                  </Text>
+                </Text>
+
+                <Text style={styles.metaLine}>
+                  <Text style={styles.metaLabel}>영상 제작 </Text>
+                  <Text style={styles.metaValue}>{selected?.publishedAt ? formatKST(selected.publishedAt) : "(없음)"}</Text>
+                </Text>
+
+                <Text style={styles.metaLine}>
+                  <Text style={styles.metaLabel}>검사 상태 </Text>
+                  <Text style={styles.metaValue}>{selected?.analysisStatus || "Done"}</Text>
+                </Text>
+                
+              </View>
+            )}
+          </View>
         </View>
       </ScrollView>
 
@@ -857,14 +850,12 @@ const styles = StyleSheet.create({
   gaugeMainText: { fontSize: 44, fontWeight: "900", letterSpacing: 1 },
   gaugeLabel: { marginTop: 10, color: "#ffffff", fontSize: 16, fontWeight: "900" },
 
-  // DualBar
   dualBarWrap: {
     width: 190,
     minHeight: 190,
     alignItems: "center",
     justifyContent: "center",
   },
-
   dualBarRow: { marginTop: 12, flexDirection: "row", gap: 18, alignItems: "flex-end" },
   barCol: { alignItems: "center", width: 70 },
   barTrack: {
@@ -877,37 +868,11 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     justifyContent: "flex-end",
   },
-  barFill: {
-    width: "100%",
-    backgroundColor: "rgba(255,255,255,0.55)", // 무채색
-  },
+  barFill: { width: "100%", backgroundColor: "rgba(255,255,255,0.55)" },
   barValue: { marginTop: 8, color: "#f0f0f0", fontSize: 14, fontWeight: "900" },
   barLabel: { marginTop: 4, color: "#cfcfcf", fontSize: 12, fontWeight: "900" },
 
-
-  detailTopRow: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 14 },
-  detailTitle: { flex: 1, color: "#fff", fontSize: 22, fontWeight: "900", lineHeight: 28 },
-
-  playBtn: {
-    width: 58,
-    height: 58,
-    borderRadius: 999,
-    backgroundColor: "#111",
-    borderWidth: 1,
-    borderColor: "#2a2b32",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  playIcon: { color: "#fff", fontSize: 18, fontWeight: "900" },
-
-  metaLine: { marginTop: 10, color: "#d5d5d5" },
-  metaLabel: { color: "#cfcfcf", fontWeight: "900" },
-  metaValue: { color: "#e9e9e9" },
-
-  summaryText: { marginTop: 16, color: "#f0f0f0", fontSize: 16, lineHeight: 24 },
-
-  expandBtn: { marginTop: 18, alignSelf: "flex-end", paddingVertical: 8, paddingHorizontal: 10, borderRadius: 12 },
-  expandText: { color: "#e5e5e5", fontSize: 16, fontWeight: "900" },
+  summaryText: { marginTop: 10, color: "#f0f0f0", fontSize: 16, lineHeight: 24 },
 
   sectionHeader: { marginTop: 6, color: "#fff", fontSize: 18, fontWeight: "900" },
   sectionBodyMuted: { marginTop: 10, color: "#d0d0d0", fontSize: 15, lineHeight: 22 },
@@ -931,14 +896,69 @@ const styles = StyleSheet.create({
   },
   evidenceLinkText: { color: "#fff", fontSize: 13, fontWeight: "900" },
 
-  verdictPill: {
+  innerDivider: {
     marginTop: 18,
-    alignSelf: "flex-end",
-    borderWidth: 2,
-    paddingVertical: 10,
-    paddingHorizontal: 18,
-    borderRadius: 999,
+    height: 1,
     backgroundColor: "rgba(255,255,255,0.10)",
   },
-  verdictPillText: { fontSize: 20, fontWeight: "900" },
+
+  // ✅ 영상 정보 박스 (근거 박스 톤)
+  videoInfoBox: {
+    marginTop: 14,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "#414247",
+    backgroundColor: "#242527",
+    padding: 14,
+  },
+  videoInfoHeaderRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  videoInfoTitle: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "900",
+  },
+
+  // 토글 버튼 공용
+  metaToggleBtn: {
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#3a3b45",
+    backgroundColor: "rgba(255,255,255,0.06)",
+  },
+  metaToggleText: { color: "#e5e5e5", fontSize: 13, fontWeight: "900" },
+
+  metaTitle: {
+    marginTop: 6,
+    color: "#fff",
+    fontSize: 18,
+    fontWeight: "900",
+    lineHeight: 24,
+  },
+
+  playInlineBtn: {
+    marginTop: 10,
+    alignSelf: "flex-start",
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#4a4b52",
+    backgroundColor: "#1a1b20",
+  },
+  playInlineText: {
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: "900",
+  },
+
+  metaLine: { marginTop: 10, color: "#d5d5d5" },
+  metaLabel: { color: "#cfcfcf", fontWeight: "900" },
+  metaValue: { color: "#e9e9e9" },
+
 });
